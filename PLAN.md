@@ -90,7 +90,6 @@ agent-sandcastle/
 │   ├── sandbox.nix            # parameterised microvm template
 │   ├── sandbox-store.nix      # curated sandbox-only nix store builder
 │   ├── launcher-module.nix    # NixOS service for the launcher
-│   ├── happy-package.nix      # pinned Happy CLI + relay packages
 │   └── happy-relay-module.nix # NixOS service for self-hosted Happy
 ├── launcher/                  # Elixir (Phoenix LiveView) — see §5
 │   ├── mix.exs
@@ -116,15 +115,19 @@ Flake outputs:
 - `nixosModules.launcher` — declares the launcher systemd service, Caddy snippet, sops dependencies
 - `nixosModules.happyRelay` — the Happy relay service
 - `packages.${system}.launcher` — the launcher binary/release for cachix
-- `packages.${system}.happy-cli` — Happy CLI built from `packages/happy-cli` in the pinned upstream monorepo
-- `packages.${system}.happy-server` — Happy relay built from `packages/happy-server` in the same pinned monorepo
+- `packages.${system}.claude-code` — Claude Code imported from `numtide/llm-agents.nix`
+- `packages.${system}.codex` — Codex imported from `numtide/llm-agents.nix`
+- `packages.${system}.happy-coder` — Happy CLI imported from `numtide/llm-agents.nix`
+- `packages.${system}.happy-cli` — compatibility alias for `happy-coder`
+- `packages.${system}.happy-server` — Happy relay package, imported from upstream when available or kept as a small local derivation
 - `packages.${system}.sandbox-base` — the base image closure
 - `packages.${system}.sandbox-store` — the curated, sandbox-only nix store path mounted into every VM
 
 Happy source model:
-- Add Happy as a pinned flake/source input (for example `inputs.happy.url = "github:slopus/happy"` pinned in `flake.lock`).
-- Build both the VM-side Happy CLI and the host-side relay from the same pinned source so mobile protocol, relay behavior, and CLI behavior advance together.
-- Expose `services.agent-sandcastle.happy.package` / `happySrc` override hooks for downstream hosts that want to test a fork without changing this repo's default pin.
+- Add `numtide/llm-agents.nix` as the default pinned flake input for agent CLI packaging.
+- Import Happy, Claude Code, and Codex from that flake so this repo does not duplicate fast-moving package logic.
+- For the Happy relay, prefer an upstream/imported output when one exists; otherwise keep a small local derivation pinned to a compatible Happy source revision.
+- Expose package override hooks for downstream hosts that want to test a fork without changing this repo's default pin.
 
 ## 5. Launcher implementation
 
@@ -298,7 +301,7 @@ A NixOS module producing a microvm.nix-compatible read-only root.
 
 **Installed:**
 - `glab`, `gh` (for completeness), `git`, `git-lfs`
-- `claude-code`, `codex`, `happy` (CLI built from `packages/happy-cli` in the pinned `slopus/happy` monorepo)
+- `claude-code`, `codex`, `happy` (imported from `numtide/llm-agents.nix`; `happy-cli` is the local alias for `happy-coder`)
 - `sandbox-happy-session` wrapper script used by systemd to launch Happy with the selected agent
 - `devenv`, `direnv`, `nix-direnv` (with direnv `flakes = true`)
 - `python3`, `nodejs`, `go`, `cargo`/`rustc` (from nixpkgs — no `rustup`, since rustup-managed toolchains write into qcow2 per VM and bypass the curated sandbox store), `uv`, `pnpm`, `bun`
@@ -354,13 +357,13 @@ Happy is first-class infrastructure for this project, but not vendored by defaul
 
 **Source/package integration**
 
-- `flake.lock` pins the upstream Happy monorepo at `slopus/happy`. The pinned source builds:
-  - `packages.${system}.happy-cli` from `packages/happy-cli` — the VM-side CLI installed in `nix/base-image.nix`
-  - `packages.${system}.happy-server` from `packages/happy-server` — the host-side relay used by `nix/happy-relay-module.nix`
-- Building both from one input keeps the mobile protocol, relay behavior, and CLI behavior advancing together.
+- `flake.lock` pins `numtide/llm-agents.nix`, which in turn pins upstream Happy and related agent tool sources.
+- The VM-side Happy CLI comes from `packages.${system}.happy-coder`, exposed locally as both `happy-coder` and `happy-cli`.
+- Claude Code and Codex come from the same imported package set, keeping agent packaging updates centralized.
+- The host-side relay should use an imported Happy relay output when available; otherwise it gets a narrow local derivation pinned to a compatible Happy source revision.
 - Default integration is a pinned Nix input, not a git submodule.
-- A fixed submodule under `vendor/happy` is a later escape hatch for local patches, source-vendoring audits, or temporary packaging gaps. If added, it should still feed the same `packages.${system}.happy-cli` and `happy-server` paths so the rest of the system does not care where the source came from.
-- Downstream hosts may override the Happy source through the NixOS module for testing a fork (`services.agent-sandcastle.happy.src`).
+- A fixed submodule under `vendor/happy` is a later escape hatch for local patches, source-vendoring audits, or temporary relay packaging gaps. If added, it should still feed the same local package names so the rest of the system does not care where the source came from.
+- Downstream hosts may override the imported packages through NixOS module options when testing forks or newer pins.
 
 **Relay module**
 
