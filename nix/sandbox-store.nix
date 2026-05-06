@@ -26,6 +26,7 @@ in
       the agent-sandcastle curated sandbox store. The host realises a
       chroot Nix store holding the union closure of every sandbox's
       runtime, so sandbox VMs can virtiofs-mount that curated subset as
+      /nix/.ro-store and let microvm.nix bind or overlay it into
       /nix/store - never the host's main /nix/store
     '';
 
@@ -35,8 +36,8 @@ in
       description = ''
         Host directory holding the curated chroot store. Populated as a
         chroot Nix store, so the actual store paths live at
-        ''${path}/nix/store - which is the path sandbox VMs share as
-        /nix/store.
+        ''${path}/nix/store - which is the path virtiofsd serves through
+        the guest's read-only store share.
       '';
     };
 
@@ -109,9 +110,9 @@ in
         # Run virtiofsd for this VM in a private mount namespace where
         # /nix/store is bind-mounted from the curated chroot store. The
         # virtiofsd `--shared-dir=/nix/store` argument (set by the
-        # microvm.shares entry in mkSandbox) then serves the curated
-        # subset to the guest, while the host's actual /nix/store stays
-        # invisible to virtiofsd and to the guest.
+        # microvm.shares entry's source in mkSandbox) then serves the
+        # curated subset to the guest's /nix/.ro-store, while the host's
+        # actual /nix/store stays invisible to virtiofsd and to the guest.
         "microvm-virtiofsd@${vmName}" = {
           after = [ "agent-sandcastle-sandbox-store.service" ];
           requires = [ "agent-sandcastle-sandbox-store.service" ];

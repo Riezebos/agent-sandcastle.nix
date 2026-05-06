@@ -1,6 +1,6 @@
 # agent-sandcastle — High-Level Plan
 
-A self-hosted control plane for spinning up isolated, mobile-controllable Claude Code / Codex sandboxes on a NixOS server. Open source, designed to compose with [microvm.nix](https://github.com/astro/microvm.nix), [happy.engineering](https://happy.engineering/), and [devenv.sh](https://devenv.sh/).
+A self-hosted control plane for spinning up isolated, mobile-controllable Claude Code / Codex sandboxes on a NixOS server. Open source, designed to compose with [microvm.nix](https://github.com/microvm-nix/microvm.nix), [happy.engineering](https://happy.engineering/), and [devenv.sh](https://devenv.sh/).
 
 ---
 
@@ -9,7 +9,7 @@ A self-hosted control plane for spinning up isolated, mobile-controllable Claude
 A single self-hosted project that gives you:
 
 - A web UI to register a GitLab repo, pick a coding agent (`claude-code`, `codex`, later more), and launch a sandboxed dev VM running that agent against it.
-- Each sandbox is a [microvm.nix](https://github.com/astro/microvm.nix) KVM VM with its own kernel, NIC, and per-VM disk.
+- Each sandbox is a [microvm.nix](https://github.com/microvm-nix/microvm.nix) KVM VM with its own kernel, NIC, and per-VM disk.
 - The VM boots with the repo cloned, a [devenv.sh](https://devenv.sh/) shell ready (auto-detected from `devenv.nix` in the repo, or generated from a UI-edited template), and a Happy session already attached to the selected agent.
 - Sessions are driven from mobile via a self-hosted [Happy](https://happy.engineering/) relay, with Happy packaged from a pinned upstream revision.
 - Sandboxes can be **forked** at any point — the fork inherits repo state, shell history, devenv state. Mechanically: qcow2 backing-file COW, O(1).
@@ -328,18 +328,60 @@ Exposes a `mkSandbox { name, repoUrl, branch, agentKey, agentCommand, agentAuthM
 - Hostname = `sandbox-${name}`
 - 2 vCPU, 2 GB RAM (configurable)
 - One virtio-blk disk = the per-sandbox qcow2 (mounted as `/home/dev`)
-- Virtiofs RO share: the **curated sandbox nix store** at `/var/lib/agent-sandcastle/store` on the host, mounted as `/nix/store` in the guest. This is a single sandbox-wide path, populated by `sandbox-store.service` (see below). The host's main `/nix/store` is never exposed to a sandbox.
+- Virtiofs RO share: a tagged `source = "/nix/store"` share, mounted as `/nix/.ro-store` in the guest. The host rewrites what `virtiofsd` serves so the guest receives the **curated sandbox nix store** at `/var/lib/agent-sandcastle/store/nix/store`, not the host's main store. microvm.nix then bind-mounts or overlays that read-only lower store into the guest's final `/nix/store`. This is a single sandbox-wide path,[^runner-closure] populated by `agent-sandcastle-sandbox-store.service` (see below).
 - A small writable store overlay (tmpfs upper layer on a per-VM block device) so guest-local `nix build` and `devenv` invocations can extend the curated store without polluting the host. Per microvm.nix docs the overlay must sit on a block device, not on the virtiofs share.
-- Virtiofs RO share: per-VM secrets dir for the deploy-key private key and the read-only Claude OAuth token (when applicable). Source path is a per-VM staged dir on the host (see §11), **not** `/run/secrets`.
-- Virtiofs RW share: per-VM `~/.codex/auth.json` mount when `agentKey == "codex"` and `agentCredentialWritable == true`, so Codex can refresh the token in place. The host file lives under `/var/lib/agent-sandcastle/codex-auth/<sandbox>/auth.json` and is persisted back into sops on stop.
+- Virtiofs RO share: per-VM secrets dir for the deploy-key private key and the read-only Claude OAuth token (when applicable). Source path is a per-VM staged dir on the host (see §11), **not** `/run/secrets`; the guest mounts it under `/run/agent-sandcastle/secrets` and units bind/symlink individual files to their final paths.
+- Virtiofs RW share: per-VM Codex auth staging dir when `agentKey == "codex"` and `agentCredentialWritable == true`, so Codex can refresh the token in place. The guest mounts it under `/run/agent-sandcastle/codex-auth`, exposes `/home/dev/.codex/auth.json` as a bind/symlink to that staged file, and the host persists `/var/lib/agent-sandcastle/codex-auth/<sandbox>/auth.json` back into sops on stop.
 - Generated `/etc/agent-sandcastle/session.env` with repo path, selected agent, agent auth mode, Happy relay URL, and Happy session name.
 - Tap device `tap-${name}` bridged to a sandboxes-only bridge with NAT.
 - Egress firewall: see §9 — default-on allowlist with provider endpoints for the selected agent, GitLab, Happy relay, and language registries.
 - Includes the base-image module from §7.
 
-**Curated sandbox store** (`nix/sandbox-store.nix`)
+**Curated sandbox store and mount constraints** (`nix/sandbox-store.nix`)
 
-A host-side NixOS service `sandbox-store.service` realises the union closure of [base image, every enabled agent profile, the Happy CLI] into `/var/lib/agent-sandcastle/store` using `nix copy --to file:///var/lib/agent-sandcastle/store`. This path is what sandboxes see as `/nix/store`. The service runs on host config changes and on agent-registry edits; it never copies anything that isn't part of the declared sandbox closure. Net effect: sandboxes share one curated store (no per-VM closure duplication) without ever seeing the host's main store, the launcher's closure, or the relay's closure.
+`microvm.nix` treats a host-provided store specially only when a share's `source` is literally `"/nix/store"`. Its guest mount logic finds `hostStore` by filtering `microvm.shares` on `source == "/nix/store"`, and `microvm.storeOnDisk` uses the same test to skip building a per-VM store disk. Upstream docs and public Nix examples follow that convention, often mounting the share at `/nix/.ro-store` and then binding or overlaying it into `/nix/store`. A share such as `source = "/var/lib/agent-sandcastle/store/nix/store"; mountPoint = "/nix/store";` would not satisfy that machinery.
+
+Agent Sandcastle therefore declares the store share as:
+
+```nix
+microvm.shares = [{
+  source = "/nix/store";
+  mountPoint = "/nix/.ro-store";
+  tag = "agent-sandcastle-curated-store";
+  proto = "virtiofs";
+  readOnly = true;
+}];
+```
+
+The host module then scans VM definitions for that tag and installs a drop-in on `microvm-virtiofsd@<name>.service`:
+
+```nix
+serviceConfig = {
+  PrivateMounts = true;
+  BindReadOnlyPaths = [
+    "${config.services.agent-sandcastle.sandboxStore.path}/nix/store:/nix/store"
+  ];
+};
+```
+
+Inside `virtiofsd`'s private mount namespace, `/nix/store` is the curated chroot store. The runner still passes `--shared-dir=/nix/store`, satisfying `microvm.nix` while keeping the host's real `/nix/store` invisible to the guest. The guest mount point stays `/nix/.ro-store` so writable-store overlay mode has a stable lowerdir and non-overlay mode can let microvm.nix bind it into `/nix/store`.
+
+A host-side NixOS service `agent-sandcastle-sandbox-store.service` realises the declared closure roots into `/var/lib/agent-sandcastle/store` using `nix copy --to "local?root=/var/lib/agent-sandcastle/store"`. The API is explicit:
+
+```nix
+services.agent-sandcastle.sandboxStore.closureRoots = [
+  config.microvm.vms.smoke.config.config.system.build.toplevel
+  config.microvm.vms.smoke.config.config.microvm.declaredRunner
+];
+```
+
+For each curated-store VM, the host config supplies the VM toplevel plus `microvm.declaredRunner`; the VM toplevel brings in the base image, enabled agent profiles, and Happy CLI. The launcher and host module should extend this option rather than inventing a second closure-root interface. The service runs on host config changes and agent-registry edits; it never copies anything that is not part of the declared sandbox runtime. Net effect: sandboxes share one curated store (no per-VM closure duplication) without ever seeing the host's main store, the launcher's closure, or the relay's closure.
+
+[^runner-closure]: The curated store must also contain each VM's microvm runner closure, including helper scripts, `virtiofsd`, `supervisord`, and the shell used by `virtiofsd-run`. Those paths may be readable inside the guest, but they are inert there and do not change the §13 threat model.
+
+**Host-side reconciliation by share tag**
+
+Guest modules declare host-side work by attaching stable tags to `microvm.shares` entries. The host module inspects evaluated `config.microvm.vms.<name>.config.config.microvm.shares`; the tag is the marker, so there is no separate per-VM "curated store enabled" option to keep in sync. Current use: `agent-sandcastle-curated-store` triggers the virtiofsd namespace drop-in above. The same pattern should be used for per-VM secret-staging dirs (§11), egress allowlist extensions (§9), and SSH host-key staging (§6): the guest-facing share declares intent, and the host reconciles the matching service, files, or firewall state.
 
 ## 9. Networking and isolation
 
@@ -349,6 +391,7 @@ A host-side NixOS service `sandbox-store.service` realises the union closure of 
 - **Egress allowlist is on by default in v1.** Default allowed: provider endpoints for the selected agent (`*.anthropic.com` for Claude, `*.openai.com` / `chatgpt.com` for Codex), the configured GitLab instance (both `services.agent-sandcastle.gitlab.baseUrl` and `sshHost`, which may differ for self-hosted installs), the Happy relay (`happy.example.com`), and a small set of language registries (`registry.npmjs.org`, `pypi.org`, `crates.io`, `proxy.golang.org`). Anything else is dropped. Self-hosted GitLab installs that mirror packages on internal hostnames (`packages.gitlab.example.com`, container registries, etc.) declare those alongside the base URL in the module options.
 - **Enforcement is host-side, not in-VM.** The allowlist is implemented in nftables on the host (matching tap interface + destination IP/SNI), not as a guest-side iptables rule, so a compromised guest cannot rewrite its own firewall. An optional forward proxy (Squid/Envoy in CONNECT-only mode) can be enabled for SNI-aware allowlisting and per-request logging; the launcher exposes a toggle but the in-kernel allowlist is the baseline.
 - Per-sandbox extensions to the allowlist are declared in the microvm definition and reconciled into nftables; ad-hoc runtime mutations are not supported.
+- Status: this is still a required v1 behavior, not a verified implementation. The current repo has not yet built or integration-tested the host nftables allowlist.
 - Limitation: a domain-allowlist firewall does not prevent exfiltration *through* an allowed domain (e.g. pushing to a GitLab branch). That risk is mitigated by branch protection (§12) and per-sandbox deploy keys, not by the firewall.
 
 ## 10. Happy integration and relay
@@ -405,7 +448,7 @@ The launcher manages secrets via `sops-nix` on the host:
 
 Sandbox VMs do **not** have access to host sops keys. They only see their own staged secret directory: the per-sandbox deploy key plus exactly one OAuth credential for the selected agent.
 
-**virtiofs + sops staging.** Mounting `/run/secrets` directly into a guest is unsafe in this stack: every `nixos-rebuild switch` (including auto-updates) remounts `/run/secrets` on the host, which makes the guest mount appear empty until the VM is rebooted ([microvm.nix issue #239](https://github.com/astro/microvm.nix/issues/239)). v1 mitigates this with two measures:
+**virtiofs + sops staging.** Mounting `/run/secrets` directly into a guest is unsafe in this stack: every `nixos-rebuild switch` (including auto-updates) remounts `/run/secrets` on the host, which makes the guest mount appear empty until the VM is rebooted ([microvm.nix issue #239](https://github.com/microvm-nix/microvm.nix/issues/239)). v1 mitigates this with two measures:
 - Set `sops.keepGenerations = 0` so old generations aren't churned out from under live mounts.
 - Stage each VM's secrets into a dedicated, per-VM directory `/var/lib/agent-sandcastle/secrets/<name>/` using a oneshot `sandbox-secrets-stage@<name>.service` that copies the relevant decrypted sops files in with `0400` mode owned by the host's `microvm` user. The microvm definition's virtiofs share points at this staged dir, **not** at `/run/secrets`. The staging service is a dependency of `microvm@<name>.service`.
 
@@ -450,7 +493,7 @@ Document the recipe in `docs/operations.md` so users understand:
 
 **In scope**
 - Supply-chain code execution from prompts (an LLM `npx`s a malicious package): contained to one VM, can't reach host or other sandboxes; egress allowlist limits exfiltration paths to provider endpoints, GitLab, and the Happy relay.
-- Sandbox enumerates host nix store: blocked. Sandboxes mount the curated sandbox store, not the host's `/nix/store`, so the launcher and relay closures (and any host secrets that ended up in derivations) are not visible to any guest.
+- Sandbox enumerates host nix store: blocked. Sandboxes mount the curated sandbox store, not the host's `/nix/store`, so the launcher and relay closures (and any host secrets that ended up in derivations) are not visible to any guest. The curated store intentionally includes each VM's microvm runner closure so `virtiofsd-run` works inside its private mount namespace; those binaries are inert inside the guest.
 - Stolen mobile device: revoke the Happy device token; sandbox keeps running but no new control.
 - Stolen GitLab sandbox deploy key: scoped to one project and Git over SSH only; it cannot call the GitLab API, cannot read other projects, and cannot push to protected `main` when no-direct-push protection is applied.
 - Compromised GitLab OAuth grant: limited to the connected service account. v1 mandates a dedicated GitLab service account so a deploy key created by it does not silently outlive a human user's tenure (deploy keys persistently inherit their creator's identity, per GitLab docs).
@@ -471,17 +514,19 @@ Full doc lives at `docs/threat-model.md`.
 
 ## 14. Milestones
 
-**M0 — Foundations (this plan + scaffolding)**
+**M0 — Foundations (curated-store plumbing + eval/build scaffolding)**
 - Repo created, license, README skeleton
-- `flake.nix` with nixpkgs + microvm.nix + pinned `slopus/happy` monorepo + (later) Elixir release tooling
-- `nix/sandbox-store.nix` builds a curated sandbox-only store path on the host
+- `flake.nix` with nixpkgs + microvm.nix + pinned `numtide/llm-agents.nix` input for Happy/Claude/Codex packaging + (later) relay packaging
+- `nix/sandbox-store.nix` and `nix/sandbox.nix` implement the curated-store builder and mount plumbing as one unit: build the curated chroot store, declare the tagged literal `/nix/store` virtiofs source mounted at `/nix/.ro-store`, and install `PrivateMounts` + `BindReadOnlyPaths` drop-ins for selected VMs
+- `services.agent-sandcastle.sandboxStore.closureRoots` API documented and wired in the example host from each VM's `system.build.toplevel` and `microvm.declaredRunner`
 - `examples/flake.nix` runs `nixos-rebuild build` on a stub host
+- No runtime boot guarantee yet; M0 proves the host config evaluates and builds, while M1 proves a guest boots against that store
 
 **M1 — Headless sandbox (no UI yet)**
 - `nix/base-image.nix` boots, has all tools, joins a tap bridge
-- `nix/sandbox.nix` exposes `mkSandbox` and mounts only the curated sandbox store at `/nix/store`
+- End-to-end boot confirms the M0 curated-store mount is the only `/nix/store` visible in the guest
 - tmpfs overlays in place; Node-based tooling runs without `O_TMPFILE` errors
-- Default-on egress allowlist enforced in host nftables
+- Default-on egress allowlist implemented and tested in host nftables
 - A hand-written sandbox in `examples/` boots, clones a public repo, starts a Happy session running a default agent, and still allows emergency `ssh`
 - A hand-written Claude sandbox can consume a mounted `CLAUDE_CODE_OAUTH_TOKEN` (RO) without persisting it into qcow2
 - A hand-written Codex sandbox can consume a writable `auth.json` mount and refresh tokens in place
@@ -512,7 +557,7 @@ Full doc lives at `docs/threat-model.md`.
 
 - **Sandbox** — one microvm.nix VM dedicated to one repo (or one fork of one).
 - **Base image** — the read-only NixOS closure used as the sandbox root.
-- **Curated sandbox store** — the single host-side path (`/var/lib/agent-sandcastle/store`) populated with the union closure of base image + enabled agents + Happy CLI, mounted as `/nix/store` into every sandbox via virtiofs RO. The host's main `/nix/store` is never exposed to sandboxes.
+- **Curated sandbox store** — the single host-side chroot store (`/var/lib/agent-sandcastle/store`) populated from explicit closure roots: VM toplevels, enabled agent/Happy packages, and the required microvm runner closures. It is served through a tagged literal `/nix/store` virtiofs source whose daemon sees a private bind mount of the curated store; the guest mounts that share at `/nix/.ro-store` and microvm.nix binds or overlays it into `/nix/store`. The host's main `/nix/store` is never exposed to sandboxes.
 - **Launcher** — the web app that orchestrates everything.
 - **Relay** — the self-hosted Happy server that forwards encrypted mobile↔sandbox traffic.
 - **Agent profile** — an allowlisted launcher entry mapping a UI choice (`claude-code`, `codex`) to a concrete VM command and required OAuth credential surface.

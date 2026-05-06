@@ -97,15 +97,16 @@ in
 
         # Source must be "/nix/store" to satisfy microvm.nix's mounts.nix
         # (it filters shares by source == "/nix/store" to decide whether
-        # to skip building a per-VM storeDisk). The host's sandbox-store
-        # module installs a per-VM virtiofsd drop-in that bind-mounts the
-        # curated chroot store over /nix/store inside virtiofsd's private
-        # mount namespace, so what the guest actually sees is the curated
-        # subset, never the host's main /nix/store.
+        # to skip building a per-VM storeDisk). Mount it at /nix/.ro-store
+        # so microvm.nix can bind or overlay it into /nix/store. The host's
+        # sandbox-store module installs a per-VM virtiofsd drop-in that
+        # bind-mounts the curated chroot store over /nix/store inside
+        # virtiofsd's private mount namespace, so what the guest actually
+        # sees is the curated subset, never the host's main /nix/store.
         shares = lib.mkIf useCuratedStore [
           {
             source = "/nix/store";
-            mountPoint = "/nix/store";
+            mountPoint = "/nix/.ro-store";
             tag = curatedStoreTag;
             proto = "virtiofs";
             readOnly = true;
