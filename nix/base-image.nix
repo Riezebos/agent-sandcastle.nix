@@ -1,6 +1,8 @@
-{ lib, pkgs, ... }:
-
-let
+{
+  lib,
+  pkgs,
+  ...
+}: let
   sandboxHappySession = pkgs.writeShellScriptBin "sandbox-happy-session" ''
     set -eu
 
@@ -30,8 +32,7 @@ let
         ;;
     esac
   '';
-in
-{
+in {
   system.stateVersion = lib.mkDefault lib.trivial.release;
 
   microvm = {
@@ -44,7 +45,7 @@ in
 
   networking = {
     useDHCP = lib.mkDefault true;
-    firewall.allowedTCPPorts = [ 22 ];
+    firewall.allowedTCPPorts = [22];
   };
 
   fileSystems = {
@@ -144,6 +145,7 @@ in
     htop
     jq
     less
+    nodejs
     openssh
     ripgrep
     sandboxHappySession

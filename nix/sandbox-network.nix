@@ -1,37 +1,58 @@
-{ config, lib, pkgs, ... }:
-
-let
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}: let
   cfg = config.services.agent-sandcastle.networking;
 
-  nft = "${pkgs.nftables}/bin/nft";
-  getent = "${pkgs.glibc.bin}/bin/getent";
-  awk = "${pkgs.gawk}/bin/awk";
-  sort = "${pkgs.coreutils}/bin/sort";
+  ip = "${pkgs.iproute2}/bin/ip";
+
+  guestConfigOf = vm:
+    if vm.config != null
+    then vm.config.config
+    else if vm.evaluatedConfig != null
+    then vm.evaluatedConfig.config
+    else null;
+
+  sandboxTapIds = vm: let
+    guestConfig = guestConfigOf vm;
+  in
+    if guestConfig == null
+    then []
+    else
+      map (interface: interface.id) (
+        builtins.filter
+        (interface:
+          interface.type
+          == "tap"
+          && lib.hasPrefix cfg.tapPrefix interface.id)
+        guestConfig.microvm.interfaces
+      );
 
   cidrElements = cidrs:
-    lib.optionalString (cidrs != [ ]) ''
+    lib.optionalString (cidrs != []) ''
       elements = { ${lib.concatStringsSep ", " cidrs} }
     '';
 
   resolveHost = host: ''
-    ${getent} ahostsv4 ${lib.escapeShellArg host} \
-      | ${awk} '{ print $1 }' \
-      | ${sort} -u \
+    getent ahostsv4 ${lib.escapeShellArg host} \
+      | awk '{ print $1 }' \
+      | sort -u \
       | while read -r address; do
         [ -n "$address" ] || continue
-        ${nft} add element inet agent_sandcastle_egress allowed_dynamic_ipv4 "{ $address }" 2>/dev/null || true
+        nft add element inet agent_sandcastle_egress allowed_dynamic_ipv4 "{ $address }" 2>/dev/null || true
       done
 
-    ${getent} ahostsv6 ${lib.escapeShellArg host} \
-      | ${awk} '{ print $1 }' \
-      | ${sort} -u \
+    getent ahostsv6 ${lib.escapeShellArg host} \
+      | awk '{ print $1 }' \
+      | sort -u \
       | while read -r address; do
         [ -n "$address" ] || continue
-        ${nft} add element inet agent_sandcastle_egress allowed_dynamic_ipv6 "{ $address }" 2>/dev/null || true
+        nft add element inet agent_sandcastle_egress allowed_dynamic_ipv6 "{ $address }" 2>/dev/null || true
       done
   '';
-in
-{
+in {
   options.services.agent-sandcastle.networking = {
     enable = lib.mkEnableOption ''
       host bridge, DHCP, NAT, and nftables egress filtering for
@@ -51,22 +72,40 @@ in
     };
 
     ipv4 = {
-      address = lib.mkOption {
-        type = lib.types.str;
-        default = "10.88.0.1/24";
-        description = "IPv4 address assigned to the sandbox bridge.";
-      };
-
       hostAddress = lib.mkOption {
         type = lib.types.str;
         default = "10.88.0.1";
         description = "IPv4 address of the sandbox bridge without CIDR suffix.";
       };
 
+      prefixLength = lib.mkOption {
+        type = lib.types.int;
+        default = 24;
+        description = "IPv4 prefix length assigned to the sandbox bridge.";
+      };
+
       subnet = lib.mkOption {
         type = lib.types.str;
         default = "10.88.0.0/24";
         description = "IPv4 subnet routed behind the sandbox bridge.";
+      };
+
+      dhcpRangeStart = lib.mkOption {
+        type = lib.types.str;
+        default = "10.88.0.100";
+        description = "First IPv4 address dnsmasq may lease to sandboxes.";
+      };
+
+      dhcpRangeEnd = lib.mkOption {
+        type = lib.types.str;
+        default = "10.88.0.254";
+        description = "Last IPv4 address dnsmasq may lease to sandboxes.";
+      };
+
+      dhcpLeaseTime = lib.mkOption {
+        type = lib.types.str;
+        default = "12h";
+        description = "dnsmasq lease time for sandbox IPv4 addresses.";
       };
     };
 
@@ -101,15 +140,15 @@ in
 
     allowedIPv4Cidrs = lib.mkOption {
       type = lib.types.listOf lib.types.str;
-      default = [ ];
-      example = [ "203.0.113.10/32" ];
+      default = [];
+      example = ["203.0.113.10/32"];
       description = "Static IPv4 CIDRs sandboxes may connect to.";
     };
 
     allowedIPv6Cidrs = lib.mkOption {
       type = lib.types.listOf lib.types.str;
-      default = [ ];
-      example = [ "2001:db8::10/128" ];
+      default = [];
+      example = ["2001:db8::10/128"];
       description = "Static IPv6 CIDRs sandboxes may connect to.";
     };
   };
@@ -120,35 +159,15 @@ in
       "net.ipv6.conf.all.forwarding" = true;
     };
 
-    systemd.network.enable = true;
-    networking.useNetworkd = lib.mkDefault true;
-
-    systemd.network.netdevs."10-agent-sandcastle" = {
-      netdevConfig = {
-        Kind = "bridge";
-        Name = cfg.bridgeName;
-      };
-    };
-
-    systemd.network.networks = {
-      "10-agent-sandcastle-bridge" = {
-        matchConfig.Name = cfg.bridgeName;
-        address = [ cfg.ipv4.address ];
-        networkConfig = {
-          DHCPServer = true;
-          IPv4Forwarding = true;
-          IPv6SendRA = false;
-        };
-        dhcpServerConfig = {
-          DNS = [ cfg.ipv4.hostAddress ];
-          EmitDNS = true;
-        };
-      };
-
-      "11-agent-sandcastle-taps" = {
-        matchConfig.Name = "${cfg.tapPrefix}*";
-        networkConfig.Bridge = cfg.bridgeName;
-      };
+    networking.bridges.${cfg.bridgeName}.interfaces = [];
+    networking.interfaces.${cfg.bridgeName} = {
+      useDHCP = false;
+      ipv4.addresses = [
+        {
+          address = cfg.ipv4.hostAddress;
+          prefixLength = cfg.ipv4.prefixLength;
+        }
+      ];
     };
 
     networking.firewall.interfaces.${cfg.bridgeName} = {
@@ -156,7 +175,7 @@ in
         53
         67
       ];
-      allowedTCPPorts = [ 53 ];
+      allowedTCPPorts = [53];
     };
 
     services.dnsmasq = {
@@ -164,7 +183,17 @@ in
       settings = {
         interface = cfg.bridgeName;
         bind-interfaces = true;
-        no-dhcp-interface = cfg.bridgeName;
+        dhcp-authoritative = true;
+        dhcp-option = [
+          "option:router,${cfg.ipv4.hostAddress}"
+          "option:dns-server,${cfg.ipv4.hostAddress}"
+        ];
+        dhcp-range = [
+          "${cfg.ipv4.dhcpRangeStart},${cfg.ipv4.dhcpRangeEnd},${cfg.ipv4.dhcpLeaseTime}"
+        ];
+        domain-needed = true;
+        bogus-priv = true;
+        local-service = true;
       };
     };
 
@@ -256,24 +285,75 @@ in
       };
     };
 
-    systemd.services.agent-sandcastle-egress-allowlist = {
-      description = "Refresh agent-sandcastle sandbox egress allowlist";
-      after = [ "network-online.target" "nftables.service" ];
-      wants = [ "network-online.target" ];
-      requires = [ "nftables.service" ];
-      serviceConfig.Type = "oneshot";
-      script = ''
-        set -eu
+    systemd.services = lib.mkMerge ([
+        {
+          dnsmasq = {
+            after = [
+              "${cfg.bridgeName}-netdev.service"
+              "network-addresses-${cfg.bridgeName}.service"
+            ];
+            requires = [
+              "${cfg.bridgeName}-netdev.service"
+              "network-addresses-${cfg.bridgeName}.service"
+            ];
+          };
 
-        ${nft} flush set inet agent_sandcastle_egress allowed_dynamic_ipv4
-        ${nft} flush set inet agent_sandcastle_egress allowed_dynamic_ipv6
+          agent-sandcastle-egress-allowlist = {
+            description = "Refresh agent-sandcastle sandbox egress allowlist";
+            after = ["network-online.target" "nftables.service"];
+            wants = ["network-online.target"];
+            requires = ["nftables.service"];
+            path = [
+              pkgs.coreutils
+              pkgs.gawk
+              pkgs.getent
+              pkgs.nftables
+            ];
+            serviceConfig.Type = "oneshot";
+            script = ''
+              set -eu
 
-        ${lib.concatMapStringsSep "\n" resolveHost cfg.allowedHostnames}
-      '';
-    };
+              command -v getent >/dev/null
+
+              nft flush set inet agent_sandcastle_egress allowed_dynamic_ipv4
+              nft flush set inet agent_sandcastle_egress allowed_dynamic_ipv6
+
+              ${lib.concatMapStringsSep "\n" resolveHost cfg.allowedHostnames}
+            '';
+          };
+        }
+      ]
+      ++ (lib.mapAttrsToList (
+          vmName: vm: let
+            tapIds = sandboxTapIds vm;
+            attachTaps = pkgs.writeShellScript "agent-sandcastle-attach-${vmName}-taps" ''
+              set -eu
+
+              ${lib.concatMapStringsSep "\n" (tapId: ''
+                  ${ip} link set dev ${lib.escapeShellArg tapId} master ${lib.escapeShellArg cfg.bridgeName}
+                  ${ip} link set dev ${lib.escapeShellArg tapId} up
+                '')
+                tapIds}
+            '';
+          in
+            lib.mkIf (tapIds != []) {
+              "microvm-tap-interfaces@${vmName}" = {
+                after = [
+                  "${cfg.bridgeName}-netdev.service"
+                  "network-addresses-${cfg.bridgeName}.service"
+                ];
+                requires = [
+                  "${cfg.bridgeName}-netdev.service"
+                  "network-addresses-${cfg.bridgeName}.service"
+                ];
+                serviceConfig.ExecStartPost = lib.mkAfter ["+${attachTaps}"];
+              };
+            }
+        )
+        config.microvm.vms));
 
     systemd.timers.agent-sandcastle-egress-allowlist = {
-      wantedBy = [ "timers.target" ];
+      wantedBy = ["timers.target"];
       timerConfig = {
         OnBootSec = "1min";
         OnUnitActiveSec = "15min";
