@@ -13,39 +13,54 @@
   outputs = { nixpkgs, microvm, agent-sandcastle, ... }:
     let
       system = "x86_64-linux";
+      hostBase = { ... }: {
+        networking.hostName = "agent-sandcastle-example";
+        system.stateVersion = nixpkgs.lib.trivial.release;
+
+        boot.loader.grub.devices = [ "nodev" ];
+        fileSystems."/" = {
+          device = "tmpfs";
+          fsType = "tmpfs";
+        };
+      };
+
+      smokeVm = { config, ... }: {
+        services.agent-sandcastle.sandboxStore = {
+          enable = true;
+          closureRoots = [
+            config.microvm.vms.smoke.config.config.system.build.toplevel
+            config.microvm.vms.smoke.config.config.microvm.declaredRunner
+          ];
+        };
+        services.agent-sandcastle.networking.enable = true;
+
+        microvm.vms.smoke = {
+          autostart = false;
+          config = agent-sandcastle.lib.mkSandbox {
+            name = "smoke";
+            networkMode = "tap";
+            useCuratedStore = true;
+          };
+        };
+      };
     in
     {
       nixosConfigurations.stub-host = nixpkgs.lib.nixosSystem {
         inherit system;
         modules = [
           agent-sandcastle.nixosModules.host
-          ({ config, ... }: {
-            networking.hostName = "agent-sandcastle-example";
-            system.stateVersion = nixpkgs.lib.trivial.release;
+          hostBase
+          smokeVm
+        ];
+      };
 
-            boot.loader.grub.devices = [ "nodev" ];
-            fileSystems."/" = {
-              device = "tmpfs";
-              fsType = "tmpfs";
-            };
-
-            services.agent-sandcastle.sandboxStore = {
-              enable = true;
-              closureRoots = [
-                config.microvm.vms.smoke.config.config.system.build.toplevel
-                config.microvm.vms.smoke.config.config.microvm.declaredRunner
-              ];
-            };
-            services.agent-sandcastle.networking.enable = true;
-
-            microvm.vms.smoke = {
-              autostart = false;
-              config = agent-sandcastle.lib.mkSandbox {
-                name = "smoke";
-                networkMode = "tap";
-                useCuratedStore = true;
-              };
-            };
+      nixosConfigurations.agent-demo-host = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [
+          agent-sandcastle.nixosModules.host
+          hostBase
+          (import ./agent-sandboxes.nix {
+            inherit agent-sandcastle;
           })
         ];
       };

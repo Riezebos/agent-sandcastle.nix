@@ -142,9 +142,11 @@ Rationale:
 
 - Phoenix + LiveView for the UI
 - Ecto + SQLite (`ecto_sqlite3`) for state — one file at `/var/lib/agent-sandcastle/state.db`
+- Jason for Phoenix/Plug JSON parsing and cookie/session-backed browser flows
 - Tesla or Req for the GitLab API client
 - Custom thin wrapper over `microvm`/`qemu-img` shelling out via `Port`
 - Claude auth helper that runs `claude setup-token` in an isolated temp home and captures the resulting token into sops
+- Development-only browser verification uses Rodney against a headless Chromium from the launcher dev shell.
 
 **State (SQLite)**
 
@@ -211,6 +213,23 @@ v1 is OAuth-only for both supported agents. API-key fallbacks are deferred so th
 - `/api/...` — JSON for scripted use (mirrors the LiveView actions)
 
 Auth: every route behind Caddy `forward_auth` to Authentik. Launcher reads `X-Authentik-Username` and `X-Authentik-Groups`; gates admin actions on `sandbox-admins` group membership.
+
+**Development verification**
+
+Launcher UI changes should run:
+- `mix format --check-formatted`
+- `mix test`
+- `nix flake check --no-build`
+- A Rodney browser smoke test against the running Phoenix dev server.
+
+The Rodney smoke path covers the dashboard, `/sandboxes/new`, LiveView client connection, sequential form entry, sandbox creation, the detail page's rendered `mkSandbox` spec, desktop/mobile no-horizontal-overflow assertions, and at least one accessibility-tree lookup for a key heading. Use `rodney start --local` from the repository root so browser state stays in ignored `.rodney/`; if Rodney cannot launch a browser, start the Nix-provided `chromium` with a remote-debugging port and `rodney connect` to it.
+
+Current frontend lessons:
+- Phoenix browser sessions require a `secret_key_base` of at least 64 bytes in dev/test too.
+- `Plug.Parsers` with `Phoenix.json_library()` needs `Jason` in dependencies.
+- LiveView forms need the Phoenix and Phoenix LiveView JavaScript loaded; server-rendered HTML alone is not enough for `phx-submit`.
+- The launcher dev shell should include `inotify-tools`, or LiveReload logs warnings and does not watch files.
+- Rodney field entry should be sequential for LiveView forms because validation patches can overwrite simultaneous typed values.
 
 ## 6. Sandbox lifecycle
 
@@ -534,6 +553,7 @@ Full doc lives at `docs/threat-model.md`.
 
 **M2 — Launcher MVP**
 - Phoenix app skeleton + SQLite + Caddy/Authentik integration
+- Launcher dev workflow includes Mix checks plus a Rodney browser smoke test of the dashboard/create/detail flow.
 - Register repo flow with GitLab service-account OAuth and coding-agent picker (auth mode is implicit per agent)
 - Launcher-guided `claude setup-token` and `codex login` flows, stored per sandbox via sops
 - Materialize per-sandbox SSH deploy keys

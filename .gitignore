@@ -3,4 +3,11 @@ result-*
 *.img
 *.qcow2
 *.sock
-
+.hex/
+.mix/
+.cache/
+.rodney/
+launcher/_build/
+launcher/deps/
+launcher/priv/*.db
+launcher/priv/*.db-*

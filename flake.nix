@@ -28,6 +28,7 @@
 
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
+      elixir = pkgs.beamMinimalPackages.elixir;
       agentPackages = llm-agents.packages.${system};
       agentOverlay = _final: _prev: {
         inherit (agentPackages) claude-code codex happy-coder;
@@ -55,18 +56,21 @@
         })
       ];
 
+      exampleHostBase = { ... }: {
+        networking.hostName = "agent-sandcastle-example";
+        system.stateVersion = lib.trivial.release;
+
+        boot.loader.grub.devices = [ "nodev" ];
+        fileSystems."/" = {
+          device = "tmpfs";
+          fsType = "tmpfs";
+        };
+      };
+
       exampleHost = mkNixos [
         self.nixosModules.host
+        exampleHostBase
         ({ config, ... }: {
-          networking.hostName = "agent-sandcastle-example";
-          system.stateVersion = lib.trivial.release;
-
-          boot.loader.grub.devices = [ "nodev" ];
-          fileSystems."/" = {
-            device = "tmpfs";
-            fsType = "tmpfs";
-          };
-
           services.agent-sandcastle.sandboxStore = {
             enable = true;
             closureRoots = [
@@ -84,6 +88,14 @@
               useCuratedStore = true;
             };
           };
+        })
+      ];
+
+      exampleAgentHost = mkNixos [
+        self.nixosModules.host
+        exampleHostBase
+        (import ./examples/agent-sandboxes.nix {
+          agent-sandcastle = self;
         })
       ];
     in
@@ -120,6 +132,7 @@
       nixosConfigurations = {
         sandbox-smoke = smokeVm;
         example-host = exampleHost;
+        example-agent-host = exampleAgentHost;
       };
 
       packages.${system} = {
@@ -148,6 +161,42 @@
         };
       };
 
-      checks.${system}.sandbox-smoke-runner = self.packages.${system}.sandbox-smoke;
+      checks.${system} = {
+        sandbox-smoke-runner = self.packages.${system}.sandbox-smoke;
+        example-host-toplevel = exampleHost.config.system.build.toplevel;
+        example-agent-host-toplevel = exampleAgentHost.config.system.build.toplevel;
+        launcher-syntax = pkgs.runCommand "agent-sandcastle-launcher-syntax"
+          {
+            nativeBuildInputs = [ elixir ];
+            src = ./launcher;
+          }
+          ''
+            cp -R "$src" launcher
+            cd launcher
+            elixir -e 'Path.wildcard("{config,lib,test}/**/*.{ex,exs}") |> Enum.each(fn file -> Code.string_to_quoted!(File.read!(file), file: file) end)'
+            touch "$out"
+          '';
+      };
+
+      devShells.${system}.launcher = pkgs.mkShell {
+        packages = [
+          pkgs.chromium
+          elixir
+          pkgs.gnumake
+          pkgs.inotify-tools
+          pkgs.pkg-config
+          pkgs.sqlite
+          pkgs.stdenv.cc
+        ];
+
+        shellHook = ''
+          export MIX_HOME="$PWD/.mix"
+          export HEX_HOME="$PWD/.hex"
+          export XDG_CACHE_HOME="$PWD/.cache"
+          export ELIXIR_MAKE_CACHE="$XDG_CACHE_HOME/elixir_make"
+          export RODNEY_HOME="$PWD/.rodney"
+          export PATH="$MIX_HOME/bin:$PATH"
+        '';
+      };
     };
 }

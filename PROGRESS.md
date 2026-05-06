@@ -6,37 +6,39 @@ Tracking against PLAN.md §14 milestones. ✅ done · 🟡 partial · ⬜ not st
 - ✅ Flake scaffolding (nixpkgs, microvm.nix, `numtide/llm-agents.nix`)
 - ✅ `nix/sandbox-store.nix` populates the curated chroot store via `nix copy --to "local?root=…"` (oneshot, ordered before `microvms.target`)
 - ✅ `examples/flake.nix` exists; `nix build .#nixosConfigurations.example-host.config.system.build.toplevel` succeeds
-- ⬜ LICENSE, README (deferred — not blocking)
+- ✅ LICENSE, README
 
 ## M1 — Headless sandbox
 - ✅ `mkSandbox` exposes a per-VM module
 - ✅ Curated store mounted at `/nix/store` (virtiofsd runs in `PrivateMounts=yes` + `BindReadOnlyPaths=<curated>:/nix/store`; host's main `/nix/store` is invisible to the guest)
 - ✅ tmpfs overlays for `/tmp`, `/var/tmp`, `/home/dev/.cache`
-- 🟡 Tap-on-bridge networking + nftables egress allowlist (host module + example config build; runtime test pending)
+- 🟡 Tap-on-bridge networking + nftables egress allowlist (host module + smoke/agent example configs build; runtime test pending)
 - ⬜ End-to-end boot test of smoke VM on a real KVM host (current verification is eval/build only)
 - 🟡 Per-sandbox Claude `CLAUDE_CODE_OAUTH_TOKEN` (RO) demo (RO secrets share + env-file wiring build-verified; real token runtime test pending)
 - 🟡 Per-sandbox Codex `auth.json` (RW + persist-back-on-stop) demo (RW auth share + guest symlink build-verified; persist-back + runtime refresh test pending)
 - ✅ Manual qcow2 `-F qcow2` backing-file fork demo
 
-## M2 — Launcher MVP — ⬜ not started
+## M2 — Launcher MVP — 🟡 dry-run scaffold started
 ## M3 — Forking + devenv UX — ⬜ not started
 ## M4 — Happy relay module + end-to-end — ⬜ not started
 
 ## Next todo order
-1. ⬜ Local hardening before another NixOS deploy
-   - Add `checks.x86_64-linux.example-host-toplevel` so `nix flake check` builds the host networking/nftables config, not just the standalone smoke runner.
-   - Add `LICENSE` and a minimal `README.md` to close the remaining M0 documentation gap.
-   - Add eval-checkable hand-written Claude/Codex example configs with dummy staged credential paths.
-   - Tighten docs/comments around current egress allowlist limits: hostname-to-IP resolution only, no wildcard/SNI enforcement yet, runtime validation still required.
+1. ✅ Local hardening before another NixOS deploy
+   - ✅ Added `checks.x86_64-linux.example-host-toplevel` so `nix flake check` builds the host networking/nftables config, not just the standalone smoke runner.
+   - ✅ Added `LICENSE` and a minimal `README.md` to close the remaining M0 documentation gap.
+   - ✅ Added eval-checkable hand-written Claude/Codex example configs with dummy staged credential paths.
+   - ✅ Tightened docs/comments around current egress allowlist limits: hostname-to-IP resolution only, no wildcard/SNI enforcement yet, runtime validation still required.
 
-2. ⬜ M2-pre: local dry-run launcher slice
-   - Scaffold `launcher/` as a Phoenix LiveView app.
-   - Add SQLite schema for `sandboxes`, `agent_credentials`, and `happy_sessions`.
-   - Add a read-only agent registry for `claude-code` and `codex`.
-   - Build a create-sandbox form for repo URL, branch, agent, and staged credential path.
-   - Persist sandbox records and render the intended VM config/spec without starting systemd or microvms.
-   - Add a dashboard showing sandbox records, selected agent, generated Happy session name, and rendered VM parameters.
-   - Package enough of the launcher to run locally and expose it through a future NixOS module, but keep the backend in `dry_run` mode.
+2. 🟡 M2-pre: local dry-run launcher slice
+   - ✅ Scaffolded `launcher/` as a Phoenix LiveView app.
+   - ✅ Added SQLite schema for `sandboxes`, `agent_credentials`, and `happy_sessions`.
+   - ✅ Added a read-only agent registry for `claude-code` and `codex`.
+   - ✅ Built a create-sandbox form for repo URL, branch, agent, and staged credential path.
+   - ✅ Persisted sandbox records and rendered the intended VM config/spec without starting systemd or microvms.
+   - ✅ Added a dashboard/detail flow showing sandbox records, selected agent, generated Happy session name, and rendered VM parameters.
+   - ✅ Added `devShells.x86_64-linux.launcher`, repo-local Hex/Mix caches, `checks.x86_64-linux.launcher-syntax`, `mix.lock`, and a passing `mix test` run.
+   - ✅ Added Rodney/Chromium as the frontend smoke-test path and ran it against the dry-run dashboard/create/detail flow.
+   - 🟡 Release packaging and future NixOS module exposure are still pending.
 
 3. ⬜ First real NixOS/KVM deployment
    - Deploy the example host config to a real KVM-capable NixOS machine.
@@ -67,3 +69,10 @@ Tracking against PLAN.md §14 milestones. ✅ done · 🟡 partial · ⬜ not st
 - `nix/sandbox-network.nix` now provides the host bridge, DHCP/DNS, NAT, and nftables egress allowlist module. The example host opts its smoke VM into TAP networking; standalone `sandbox-smoke` keeps QEMU user networking so `sshHostPort` still works without host bridge setup.
 - Current workspace has no `/dev/kvm`, so boot/runtime credential demos remain pending even though eval/build checks pass.
 - qcow2 fork smoke demo succeeded under `/tmp/agent-sandcastle-qcow2.x2TBVN`: `qemu-img create -f qcow2 -F qcow2 -b base.qcow2 child.qcow2`, and `qemu-img info --output=json` reported `"backing-filename-format": "qcow2"`.
+- Added `nixosConfigurations.example-agent-host` plus downstream `examples/flake.nix#nixosConfigurations.agent-demo-host` for hand-written Claude/Codex sandbox examples. Dummy credential staging paths live under `/var/lib/agent-sandcastle/example-credentials`.
+- Verified `nix flake check --no-build` and `nix build --no-link .#checks.x86_64-linux.example-host-toplevel .#checks.x86_64-linux.example-agent-host-toplevel`.
+- Added the initial Phoenix LiveView dry-run launcher scaffold under `launcher/`, with SQLite migrations, Ecto schemas/context, agent registry, create/dashboard/detail LiveViews, and dry-run VM spec rendering.
+- Installed Hex/Rebar into ignored repo-local caches, fetched launcher dependencies, committed `launcher/mix.lock`, and verified `mix format --check-formatted` plus `mix test`.
+- Verified launcher syntax with `nix build --no-link .#checks.x86_64-linux.launcher-syntax`.
+- Used `rodney --help`, then Rodney against headless Chromium to test the launcher UI. Covered dashboard load, LiveView connection, `/sandboxes/new`, sequential Codex form entry, submit, detail-page rendered `mkSandbox` spec, dashboard row rendering, desktop/mobile no-horizontal-overflow assertions, accessibility lookup for "Rendered VM Spec", and screenshots under ignored `.cache/`.
+- Rodney caught useful runtime gaps that unit tests missed: missing `Jason`, too-short dev/test `secret_key_base`, missing LiveView client JS for `phx-submit`, missing `inotify-tools` for LiveReload, and a LiveView testing pattern issue where parallel field input can race validation patches.
