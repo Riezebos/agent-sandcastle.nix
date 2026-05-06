@@ -10,8 +10,15 @@ let
       octet = offset: builtins.substring offset 2 hash;
     in
     "02:00:${octet 0}:${octet 2}:${octet 4}:${octet 6}";
+
+  # Tag also referenced by nix/sandbox-store.nix to detect VMs that should
+  # have their virtiofsd run in a private mount namespace where /nix/store
+  # is bind-mounted from the curated chroot store.
+  curatedStoreTag = "agent-sandcastle-curated-store";
 in
 {
+  inherit curatedStoreTag;
+
   mkSandbox =
     { name
     , repoUrl ? null
@@ -27,6 +34,7 @@ in
     , vcpu ? 2
     , memoryMiB ? 2304
     , diskSizeMiB ? 4096
+    , useCuratedStore ? false
     }:
     { lib, pkgs, ... }:
 
@@ -86,6 +94,23 @@ in
             guest.port = 22;
           }
         );
+
+        # Source must be "/nix/store" to satisfy microvm.nix's mounts.nix
+        # (it filters shares by source == "/nix/store" to decide whether
+        # to skip building a per-VM storeDisk). The host's sandbox-store
+        # module installs a per-VM virtiofsd drop-in that bind-mounts the
+        # curated chroot store over /nix/store inside virtiofsd's private
+        # mount namespace, so what the guest actually sees is the curated
+        # subset, never the host's main /nix/store.
+        shares = lib.mkIf useCuratedStore [
+          {
+            source = "/nix/store";
+            mountPoint = "/nix/store";
+            tag = curatedStoreTag;
+            proto = "virtiofs";
+            readOnly = true;
+          }
+        ];
       };
 
       users.users.dev.openssh.authorizedKeys.keys = authorizedKeys;

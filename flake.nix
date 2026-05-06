@@ -57,7 +57,7 @@
 
       exampleHost = mkNixos [
         self.nixosModules.host
-        {
+        ({ config, ... }: {
           networking.hostName = "agent-sandcastle-example";
           system.stateVersion = lib.trivial.release;
 
@@ -67,16 +67,23 @@
             fsType = "tmpfs";
           };
 
-          services.agent-sandcastle.sandboxStore.enable = true;
+          services.agent-sandcastle.sandboxStore = {
+            enable = true;
+            closureRoots = [
+              config.microvm.vms.smoke.config.config.system.build.toplevel
+              config.microvm.vms.smoke.config.config.microvm.declaredRunner
+            ];
+          };
 
           microvm.vms.smoke = {
             autostart = false;
             config = self.lib.mkSandbox {
               name = "smoke";
               sshHostPort = 2222;
+              useCuratedStore = true;
             };
           };
-        }
+        })
       ];
     in
     {
@@ -122,13 +129,10 @@
 
         sandbox-smoke = smokeVm.config.microvm.declaredRunner;
 
-        sandbox-store = pkgs.buildEnv {
-          name = "agent-sandcastle-sandbox-store";
-          paths = [
+        sandbox-store = pkgs.closureInfo {
+          rootPaths = [
             smokeVm.config.system.build.toplevel
           ];
-          pathsToLink = [ "/" ];
-          ignoreCollisions = true;
         };
       };
 

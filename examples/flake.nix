@@ -19,7 +19,7 @@
         inherit system;
         modules = [
           agent-sandcastle.nixosModules.host
-          {
+          ({ config, ... }: {
             networking.hostName = "agent-sandcastle-example";
             system.stateVersion = nixpkgs.lib.trivial.release;
 
@@ -29,16 +29,23 @@
               fsType = "tmpfs";
             };
 
-            services.agent-sandcastle.sandboxStore.enable = true;
+            services.agent-sandcastle.sandboxStore = {
+              enable = true;
+              closureRoots = [
+                config.microvm.vms.smoke.config.config.system.build.toplevel
+                config.microvm.vms.smoke.config.config.microvm.declaredRunner
+              ];
+            };
 
             microvm.vms.smoke = {
               autostart = false;
               config = agent-sandcastle.lib.mkSandbox {
                 name = "smoke";
                 sshHostPort = 2222;
+                useCuratedStore = true;
               };
             };
-          }
+          })
         ];
       };
     };
