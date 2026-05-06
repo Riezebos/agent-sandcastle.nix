@@ -11,6 +11,12 @@ let
     in
     "02:00:${octet 0}:${octet 2}:${octet 4}:${octet 6}";
 
+  tapForName = name:
+    "tap-${builtins.substring 0 11 (builtins.hashString "sha256" name)}";
+
+  shareTagForName = prefix: name:
+    "${prefix}-${builtins.substring 0 16 (builtins.hashString "sha256" name)}";
+
   # Tag also referenced by nix/sandbox-store.nix to detect VMs that should
   # have their virtiofsd run in a private mount namespace where /nix/store
   # is bind-mounted from the curated chroot store.
@@ -27,10 +33,17 @@ in
     , agentKey ? "noop"
     , agentCommand ? [ ]
     , agentAuthMode ? "none"
+    , agentSecretsSource ? null
+    , claudeEnvironmentFile ? "/run/agent-sandcastle/secrets/claude.env"
+    , codexAuthSource ? null
+    , codexAuthJson ? "/run/agent-sandcastle/codex-auth/auth.json"
     , happyRelayUrl ? "http://127.0.0.1:3005"
     , happySessionName ? name
     , authorizedKeys ? [ ]
     , sshHostPort ? null
+    , networkMode ? "user"
+    , tapInterface ? tapForName name
+    , tapVhost ? true
     , vcpu ? 2
     , memoryMiB ? 2304
     , diskSizeMiB ? 4096
@@ -44,6 +57,9 @@ in
 
       agentCommandLine =
         lib.concatMapStringsSep " " lib.escapeShellArg agentCommand;
+
+      agentSecretsMountPoint = "/run/agent-sandcastle/secrets";
+      codexAuthMountPoint = "/run/agent-sandcastle/codex-auth";
 
       agentStartScript =
         if agentCommand == [ ] then
@@ -62,6 +78,18 @@ in
           assertion = validName name;
           message = "agent-sandcastle sandbox names must start with an alphanumeric character and contain only letters, numbers, '.', '_' or '-'.";
         }
+        {
+          assertion = builtins.elem networkMode [ "user" "tap" ];
+          message = "agent-sandcastle sandbox networkMode must be either \"user\" or \"tap\".";
+        }
+        {
+          assertion = agentAuthMode != "claude-oauth-token" || agentSecretsSource != null;
+          message = "agent-sandcastle sandboxes using claude-oauth-token must set agentSecretsSource to a staged host directory containing the Claude environment file.";
+        }
+        {
+          assertion = agentAuthMode != "codex-chatgpt-oauth" || codexAuthSource != null;
+          message = "agent-sandcastle sandboxes using codex-chatgpt-oauth must set codexAuthSource to a staged writable host directory containing auth.json.";
+        }
       ];
 
       networking.hostName = lib.mkDefault name;
@@ -79,16 +107,28 @@ in
           }
         ];
 
-        interfaces = lib.mkDefault [
-          {
-            type = "user";
-            id = "qemu";
-            mac = macForName name;
-          }
-        ];
+        interfaces = lib.mkDefault (
+          if networkMode == "tap" then
+            [
+              {
+                type = "tap";
+                id = tapInterface;
+                mac = macForName name;
+                tap.vhost = tapVhost;
+              }
+            ]
+          else
+            [
+              {
+                type = "user";
+                id = "qemu";
+                mac = macForName name;
+              }
+            ]
+        );
 
         forwardPorts = lib.mkDefault (
-          lib.optional (sshHostPort != null) {
+          lib.optional (networkMode == "user" && sshHostPort != null) {
             from = "host";
             host.port = sshHostPort;
             guest.port = 22;
@@ -103,15 +143,29 @@ in
         # bind-mounts the curated chroot store over /nix/store inside
         # virtiofsd's private mount namespace, so what the guest actually
         # sees is the curated subset, never the host's main /nix/store.
-        shares = lib.mkIf useCuratedStore [
-          {
+        shares = lib.mkDefault (
+          lib.optional useCuratedStore {
             source = "/nix/store";
             mountPoint = "/nix/.ro-store";
             tag = curatedStoreTag;
             proto = "virtiofs";
             readOnly = true;
           }
-        ];
+          ++ lib.optional (agentSecretsSource != null) {
+            source = agentSecretsSource;
+            mountPoint = agentSecretsMountPoint;
+            tag = shareTagForName "as-secrets" name;
+            proto = "virtiofs";
+            readOnly = true;
+          }
+          ++ lib.optional (codexAuthSource != null) {
+            source = codexAuthSource;
+            mountPoint = codexAuthMountPoint;
+            tag = shareTagForName "as-codex-auth" name;
+            proto = "virtiofs";
+            readOnly = false;
+          }
+        );
       };
 
       users.users.dev.openssh.authorizedKeys.keys = authorizedKeys;
@@ -147,6 +201,18 @@ in
 
           parent_dir="$(${pkgs.coreutils}/bin/dirname "$workdir")"
           install -d -o dev -g users "$parent_dir" /home/dev/.agent-sandcastle
+
+          ${lib.optionalString (agentAuthMode == "codex-chatgpt-oauth") ''
+            if [ ! -e ${lib.escapeShellArg codexAuthJson} ]; then
+              echo "${codexAuthJson} does not exist; refusing to start Codex without its mounted auth.json" >&2
+              exit 1
+            fi
+
+            install -d -o dev -g users /home/dev/.codex
+            rm -f /home/dev/.codex/auth.json
+            ln -s ${lib.escapeShellArg codexAuthJson} /home/dev/.codex/auth.json
+            chown -h dev:users /home/dev/.codex/auth.json
+          ''}
 
           if [ -n "$repo_url" ]; then
             if [ ! -d "$workdir/.git" ]; then
@@ -187,7 +253,9 @@ in
           User = "dev";
           Group = "users";
           WorkingDirectory = workdir;
-          EnvironmentFile = "/etc/agent-sandcastle/session.env";
+          EnvironmentFile = [
+            "/etc/agent-sandcastle/session.env"
+          ] ++ lib.optional (agentAuthMode == "claude-oauth-token") claudeEnvironmentFile;
           ExecStart = agentStartScript;
           Restart = "on-failure";
         };

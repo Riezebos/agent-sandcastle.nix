@@ -74,12 +74,13 @@
               config.microvm.vms.smoke.config.config.microvm.declaredRunner
             ];
           };
+          services.agent-sandcastle.networking.enable = true;
 
           microvm.vms.smoke = {
             autostart = false;
             config = self.lib.mkSandbox {
               name = "smoke";
-              sshHostPort = 2222;
+              networkMode = "tap";
               useCuratedStore = true;
             };
           };
@@ -100,11 +101,13 @@
         };
 
         sandboxStore = import ./nix/sandbox-store.nix;
+        sandboxNetwork = import ./nix/sandbox-network.nix;
 
         host = { ... }: {
           imports = [
             microvm.nixosModules.host
             self.nixosModules.sandboxStore
+            self.nixosModules.sandboxNetwork
           ];
 
           nixpkgs.overlays = [

@@ -16,6 +16,9 @@ let
     case "$1" in
       claude|claude-code)
         shift
+        if [ -n "''${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+          rm -f "$HOME/.claude/.credentials.json"
+        fi
         exec ${lib.getExe pkgs.happy-coder} "$@"
         ;;
       codex)
@@ -43,6 +46,45 @@ in
     useDHCP = lib.mkDefault true;
     firewall.allowedTCPPorts = [ 22 ];
   };
+
+  fileSystems = {
+    "/tmp" = {
+      device = lib.mkDefault "tmpfs";
+      fsType = lib.mkDefault "tmpfs";
+      options = lib.mkDefault [
+        "mode=1777"
+        "nosuid"
+        "nodev"
+        "size=50%"
+      ];
+    };
+
+    "/var/tmp" = {
+      device = lib.mkDefault "tmpfs";
+      fsType = lib.mkDefault "tmpfs";
+      options = lib.mkDefault [
+        "mode=1777"
+        "nosuid"
+        "nodev"
+        "size=50%"
+      ];
+    };
+
+    "/home/dev/.cache" = {
+      device = lib.mkDefault "tmpfs";
+      fsType = lib.mkDefault "tmpfs";
+      options = lib.mkDefault [
+        "mode=0700"
+        "nosuid"
+        "nodev"
+        "size=25%"
+      ];
+    };
+  };
+
+  systemd.tmpfiles.rules = [
+    "d /home/dev/.cache 0700 dev users -"
+  ];
 
   services.openssh = {
     enable = true;

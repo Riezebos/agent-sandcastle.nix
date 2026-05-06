@@ -36,12 +36,13 @@
                 config.microvm.vms.smoke.config.config.microvm.declaredRunner
               ];
             };
+            services.agent-sandcastle.networking.enable = true;
 
             microvm.vms.smoke = {
               autostart = false;
               config = agent-sandcastle.lib.mkSandbox {
                 name = "smoke";
-                sshHostPort = 2222;
+                networkMode = "tap";
                 useCuratedStore = true;
               };
             };
