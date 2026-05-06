@@ -30,6 +30,12 @@
       pkgs = nixpkgs.legacyPackages.${system};
       elixir = pkgs.beamMinimalPackages.elixir;
       agentPackages = llm-agents.packages.${system};
+
+      launcher = pkgs.callPackage ./nix/launcher.nix {
+        # Re-derive after editing `launcher/mix.lock`:
+        #   nix build "path:$PWD#launcher" — copy the `got:` hash, paste here.
+        fetchMixDepsHash = "sha256-u47tIYiqTU2UAn4WlQrrNcOBi7vFVo9Qh8e0f59Jlxw=";
+      };
       agentOverlay = _final: _prev: {
         inherit (agentPackages) claude-code codex happy-coder;
       };
@@ -98,6 +104,22 @@
           agent-sandcastle = self;
         })
       ];
+
+      exampleLauncherHost = mkNixos [
+        self.nixosModules.host
+        self.nixosModules.launcher
+        exampleHostBase
+        ({ ... }: {
+          # The actual file is provisioned out-of-band (sops-nix, deploy SSH,
+          # etc.). For eval/build coverage we only need the path to exist as a
+          # placeholder; runtime tests stage a real file.
+          services.agent-sandcastle.launcher = {
+            enable = true;
+            host = "sandboxes.example.com";
+            environmentFile = "/var/lib/agent-sandcastle/example-launcher.env";
+          };
+        })
+      ];
     in
     {
       lib = import ./nix/sandbox.nix {
@@ -114,6 +136,7 @@
 
         sandboxStore = import ./nix/sandbox-store.nix;
         sandboxNetwork = import ./nix/sandbox-network.nix;
+        launcher = import ./nix/launcher-module.nix { inherit self; };
 
         host = { ... }: {
           imports = [
@@ -133,6 +156,7 @@
         sandbox-smoke = smokeVm;
         example-host = exampleHost;
         example-agent-host = exampleAgentHost;
+        example-launcher-host = exampleLauncherHost;
       };
 
       packages.${system} = {
@@ -142,6 +166,8 @@
         codex = agentPackages.codex;
         happy-cli = self.packages.${system}.happy-coder;
         happy-coder = agentPackages.happy-coder;
+
+        launcher = launcher;
 
         sandbox-smoke = smokeVm.config.microvm.declaredRunner;
 
@@ -165,6 +191,8 @@
         sandbox-smoke-runner = self.packages.${system}.sandbox-smoke;
         example-host-toplevel = exampleHost.config.system.build.toplevel;
         example-agent-host-toplevel = exampleAgentHost.config.system.build.toplevel;
+        example-launcher-host-toplevel = exampleLauncherHost.config.system.build.toplevel;
+        launcher-release = launcher;
         launcher-syntax = pkgs.runCommand "agent-sandcastle-launcher-syntax"
           {
             nativeBuildInputs = [ elixir ];

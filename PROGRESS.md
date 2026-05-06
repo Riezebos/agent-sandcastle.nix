@@ -29,7 +29,7 @@ Tracking against PLAN.md §14 milestones. ✅ done · 🟡 partial · ⬜ not st
    - ✅ Added eval-checkable hand-written Claude/Codex example configs with dummy staged credential paths.
    - ✅ Tightened docs/comments around current egress allowlist limits: hostname-to-IP resolution only, no wildcard/SNI enforcement yet, runtime validation still required.
 
-2. 🟡 M2-pre: local dry-run launcher slice
+2. ✅ M2-pre: local dry-run launcher slice
    - ✅ Scaffolded `launcher/` as a Phoenix LiveView app.
    - ✅ Added SQLite schema for `sandboxes`, `agent_credentials`, and `happy_sessions`.
    - ✅ Added a read-only agent registry for `claude-code` and `codex`.
@@ -38,7 +38,9 @@ Tracking against PLAN.md §14 milestones. ✅ done · 🟡 partial · ⬜ not st
    - ✅ Added a dashboard/detail flow showing sandbox records, selected agent, generated Happy session name, and rendered VM parameters.
    - ✅ Added `devShells.x86_64-linux.launcher`, repo-local Hex/Mix caches, `checks.x86_64-linux.launcher-syntax`, `mix.lock`, and a passing `mix test` run.
    - ✅ Added Rodney/Chromium as the frontend smoke-test path and ran it against the dry-run dashboard/create/detail flow.
-   - 🟡 Release packaging and future NixOS module exposure are still pending.
+   - ✅ Added a `mix release` config plus an `AgentSandcastleLauncher.Release.migrate/0` helper so the systemd unit can reconcile the SQLite schema before serving traffic. `runtime.exs` flips the endpoint to `server: true` only when `PHX_SERVER=true`, and accepts `PHX_HTTP_IP` for non-loopback binds.
+   - ✅ Packaged the release through `pkgs.beamPackages.mixRelease` in `nix/launcher.nix` (with `ELIXIR_MAKE_FORCE_BUILD=true` and a writable `XDG_CACHE_HOME` so exqlite's NIF compiles in the sandbox). Exposed it as `packages.x86_64-linux.launcher` and `checks.x86_64-linux.launcher-release`.
+   - ✅ Added `nixosModules.launcher` (`nix/launcher-module.nix`) with `services.agent-sandcastle.launcher` options for host/port/bind-address, an `EnvironmentFile=` for `SECRET_KEY_BASE`/`RELEASE_COOKIE`, automatic migrations via `ExecStartPre`, and a hardened systemd service with `StateDirectory=agent-sandcastle`. Wired into a downstream `example-launcher-host` config plus `checks.x86_64-linux.example-launcher-host-toplevel`.
 
 3. ⬜ First real NixOS/KVM deployment
    - Deploy the example host config to a real KVM-capable NixOS machine.
@@ -74,5 +76,7 @@ Tracking against PLAN.md §14 milestones. ✅ done · 🟡 partial · ⬜ not st
 - Added the initial Phoenix LiveView dry-run launcher scaffold under `launcher/`, with SQLite migrations, Ecto schemas/context, agent registry, create/dashboard/detail LiveViews, and dry-run VM spec rendering.
 - Installed Hex/Rebar into ignored repo-local caches, fetched launcher dependencies, committed `launcher/mix.lock`, and verified `mix format --check-formatted` plus `mix test`.
 - Verified launcher syntax with `nix build --no-link .#checks.x86_64-linux.launcher-syntax`.
+- Confirmed the `mix release` artifact built through `pkgs.beamPackages.mixRelease` runs `AgentSandcastleLauncher.Release.migrate()` against an ephemeral SQLite path (53 KiB DB created with all migrations applied) and verified the resulting NixOS host config builds via `nix build --no-link "path:$PWD#checks.x86_64-linux.example-launcher-host-toplevel"`.
+- `fetchMixDeps` hash currently `sha256-u47tIYiqTU2UAn4WlQrrNcOBi7vFVo9Qh8e0f59Jlxw=`; refresh it whenever `launcher/mix.lock` changes.
 - Used `rodney --help`, then Rodney against headless Chromium to test the launcher UI. Covered dashboard load, LiveView connection, `/sandboxes/new`, sequential Codex form entry, submit, detail-page rendered `mkSandbox` spec, dashboard row rendering, desktop/mobile no-horizontal-overflow assertions, accessibility lookup for "Rendered VM Spec", and screenshots under ignored `.cache/`.
 - Rodney caught useful runtime gaps that unit tests missed: missing `Jason`, too-short dev/test `secret_key_base`, missing LiveView client JS for `phx-submit`, missing `inotify-tools` for LiveReload, and a LiveView testing pattern issue where parallel field input can race validation patches.

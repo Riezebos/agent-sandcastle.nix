@@ -10,7 +10,17 @@ defmodule AgentSandcastleLauncher.MixProject do
       listeners: [Phoenix.CodeReloader],
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
-      deps: deps()
+      deps: deps(),
+      releases: releases()
+    ]
+  end
+
+  defp releases do
+    [
+      agent_sandcastle_launcher: [
+        include_executables_for: [:unix],
+        applications: [agent_sandcastle_launcher: :permanent]
+      ]
     ]
   end
 
