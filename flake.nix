@@ -34,7 +34,7 @@
       launcher = pkgs.callPackage ./nix/launcher.nix {
         # Re-derive after editing `launcher/mix.lock`:
         #   nix build "path:$PWD#launcher" — copy the `got:` hash, paste here.
-        fetchMixDepsHash = lib.fakeHash;
+        fetchMixDepsHash = "sha256-Hjluglh8h1zDt1UCOARgXiasEAIDUNr7nxX94QxsZ2U=";
       };
       agentOverlay = _final: _prev: {
         inherit (agentPackages) claude-code codex happy-coder;
