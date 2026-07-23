@@ -5,7 +5,7 @@ defmodule AgentSandcastleLauncher.Sandboxes.AgentCredential do
   schema "agent_credentials" do
     field :agent_key, :string
     field :auth_mode, :string
-    field :staged_path, :string
+    field :credential_id, Ecto.UUID
     field :writable, :boolean, default: false
     field :last_persisted_at, :utc_datetime_usec
     field :expires_at, :utc_datetime_usec
@@ -22,13 +22,14 @@ defmodule AgentSandcastleLauncher.Sandboxes.AgentCredential do
       :sandbox_id,
       :agent_key,
       :auth_mode,
-      :staged_path,
+      :credential_id,
       :writable,
       :last_persisted_at,
       :expires_at,
       :revoked_at
     ])
-    |> validate_required([:sandbox_id, :agent_key, :auth_mode, :staged_path, :writable])
+    |> validate_required([:sandbox_id, :agent_key, :auth_mode, :credential_id, :writable])
+    |> unique_constraint(:credential_id)
     |> foreign_key_constraint(:sandbox_id)
   end
 end

@@ -18,6 +18,7 @@ defmodule AgentSandcastleLauncher.Sandboxes.Sandbox do
     belongs_to :parent_sandbox, __MODULE__
     has_one :agent_credential, AgentSandcastleLauncher.Sandboxes.AgentCredential
     has_one :happy_session, AgentSandcastleLauncher.Sandboxes.HappySession
+    has_many :audit_events, AgentSandcastleLauncher.Audit.Event
 
     timestamps(type: :utc_datetime_usec)
   end

@@ -24,8 +24,9 @@ Implemented so far:
   NAT, and an IP-based nftables egress allowlist.
 - Eval/build examples for a smoke VM and dummy Claude/Codex agent sandboxes.
 - A Phoenix LiveView launcher scaffold in `launcher/` that stores dry-run
-  sandbox records in SQLite and renders intended VM specs without lifecycle
-  side effects.
+  sandbox records in SQLite, enforces Authentik identity/group authorization,
+  records audit attribution, and renders path-free VM config functions without
+  lifecycle side effects.
 
 ## Quick Checks
 

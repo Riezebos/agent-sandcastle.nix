@@ -9,16 +9,14 @@ defmodule AgentSandcastleLauncher.Sandboxes.SandboxRequest do
     field :repo_url, :string
     field :branch, :string, default: "main"
     field :agent_key, :string, default: "claude-code"
-    field :credential_path, :string
   end
 
   def changeset(request, attrs) do
     request
-    |> cast(attrs, [:repo_url, :branch, :agent_key, :credential_path])
+    |> cast(attrs, [:repo_url, :branch, :agent_key])
     |> update_change(:repo_url, &trim/1)
     |> update_change(:branch, &trim/1)
-    |> update_change(:credential_path, &trim/1)
-    |> validate_required([:repo_url, :branch, :agent_key, :credential_path])
+    |> validate_required([:repo_url, :branch, :agent_key])
     |> validate_change(:agent_key, fn :agent_key, key ->
       if Registry.valid_key?(key), do: [], else: [agent_key: "is not enabled"]
     end)

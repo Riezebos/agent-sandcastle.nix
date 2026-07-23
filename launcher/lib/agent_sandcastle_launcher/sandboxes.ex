@@ -7,6 +7,7 @@ defmodule AgentSandcastleLauncher.Sandboxes do
 
   alias Ecto.Multi
   alias AgentSandcastleLauncher.Agents.Registry
+  alias AgentSandcastleLauncher.Audit.Event
   alias AgentSandcastleLauncher.Repo
   alias AgentSandcastleLauncher.Sandboxes.AgentCredential
   alias AgentSandcastleLauncher.Sandboxes.HappySession
@@ -33,12 +34,13 @@ defmodule AgentSandcastleLauncher.Sandboxes do
     SandboxRequest.changeset(%SandboxRequest{}, attrs)
   end
 
-  def create_sandbox(attrs) do
+  def create_sandbox(attrs, actor) when is_binary(actor) do
     changeset = change_sandbox_request(attrs)
 
     if changeset.valid? do
       request = Ecto.Changeset.apply_changes(changeset)
       agent = Registry.fetch!(request.agent_key)
+      credential_id = Ecto.UUID.generate()
       name = sandbox_name(request.repo_url)
       happy_session_name = "#{name}-#{short_id()}"
       qcow2_path = "/var/lib/agent-sandcastle/disks/#{name}.qcow2"
@@ -47,7 +49,6 @@ defmodule AgentSandcastleLauncher.Sandboxes do
         name: name,
         repo_url: request.repo_url,
         branch: request.branch,
-        credential_path: request.credential_path,
         happy_relay_url: @happy_relay_url,
         happy_session_name: happy_session_name,
         qcow2_path: qcow2_path
@@ -76,7 +77,7 @@ defmodule AgentSandcastleLauncher.Sandboxes do
           sandbox_id: sandbox.id,
           agent_key: agent.key,
           auth_mode: agent.auth_mode,
-          staged_path: request.credential_path,
+          credential_id: credential_id,
           writable: agent.writable
         })
       end)
@@ -86,6 +87,19 @@ defmodule AgentSandcastleLauncher.Sandboxes do
           relay_url: @happy_relay_url,
           session_name: happy_session_name,
           status: "planned"
+        })
+      end)
+      |> Multi.insert(:audit_event, fn %{sandbox: sandbox} ->
+        Event.changeset(%Event{}, %{
+          sandbox_id: sandbox.id,
+          action: "sandbox.create_dry_run",
+          actor: actor,
+          payload: %{
+            "agent_key" => agent.key,
+            "branch" => request.branch,
+            "credential_id" => credential_id,
+            "repo_url" => request.repo_url
+          }
         })
       end)
       |> Repo.transaction()

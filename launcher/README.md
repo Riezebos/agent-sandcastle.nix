@@ -1,8 +1,8 @@
 # Agent Sandcastle Launcher
 
 Dry-run Phoenix LiveView scaffold for M2-pre. It records sandbox requests in
-SQLite, resolves a read-only agent profile, and renders the intended
-`mkSandbox` VM config without starting systemd or microVM units.
+SQLite, resolves a read-only agent profile, and renders a path-free
+`mkSandbox` VM config function without starting systemd or microVM units.
 
 Local run target once the Beam toolchain is available:
 
@@ -40,6 +40,18 @@ rodney assert 'document.querySelector("[data-phx-main]").classList.contains("phx
 ```
 
 Then drive the create flow with Rodney: open `/sandboxes/new`, fill repo URL,
-branch, agent, and credential path sequentially, submit, and assert that the
-detail page renders the expected `mkSandbox` auth fields. Keep field entry
-sequential; parallel input commands can race LiveView validation patches.
+branch, and agent sequentially, submit, and assert that the detail page renders
+an opaque credential ID plus the expected path-free `mkSandbox` auth fields.
+Keep field entry sequential; parallel input commands can race LiveView
+validation patches.
+
+Production authorization is enforced twice: Caddy's Authentik `forward_auth`
+handler establishes the identity headers, and the launcher requires
+`X-Authentik-Username` plus membership in `AUTHENTIK_ADMIN_GROUP` (default
+`sandbox-admins`). `AUTHENTIK_REQUIRED` defaults to true in production.
+Create actions record the attributed username in `audit_events`.
+
+The browser never submits a credential path. The launcher generates an opaque
+UUID and renders a Nix function accepting `credentialSource`; the future
+root-owned lifecycle broker is the only component allowed to resolve that UUID
+beneath its fixed staging root.

@@ -41,6 +41,10 @@ Tracking against PLAN.md §14 milestones. ✅ done · 🟡 partial · ⬜ not st
    - ✅ Added a `mix release` config plus an `AgentSandcastleLauncher.Release.migrate/0` helper so the systemd unit can reconcile the SQLite schema before serving traffic. `runtime.exs` flips the endpoint to `server: true` only when `PHX_SERVER=true`, and accepts `PHX_HTTP_IP` for non-loopback binds.
    - ✅ Packaged the release through `pkgs.beamPackages.mixRelease` in `nix/launcher.nix` (with `ELIXIR_MAKE_FORCE_BUILD=true` and a writable `XDG_CACHE_HOME` so exqlite's NIF compiles in the sandbox). Exposed it as `packages.x86_64-linux.launcher` and `checks.x86_64-linux.launcher-release`.
    - ✅ Added `nixosModules.launcher` (`nix/launcher-module.nix`) with `services.agent-sandcastle.launcher` options for host/port/bind-address, an `EnvironmentFile=` for `SECRET_KEY_BASE`/`RELEASE_COOKIE`, automatic migrations via `ExecStartPre`, and a hardened systemd service with `StateDirectory=agent-sandcastle`. Wired into a downstream `example-launcher-host` config plus `checks.x86_64-linux.example-launcher-host-toplevel`.
+   - ✅ Removed the free-form credential path from the request/UI. Dry runs now generate opaque UUID credential IDs, and the renderer emits a function whose `credentialSource` must be supplied by the future trusted broker.
+   - ✅ Added application-level Authentik username/group enforcement, `sandbox-admins` gating, create-action audit attribution, path/escaping/Codex coverage, and a LiveView create-flow test.
+   - ✅ Tightened the Phoenix unit for its still-dry-run scope with `NoNewPrivileges`, `ProtectSystem=strict`, a private device view, and a state-directory-only write boundary.
+   - ✅ Refreshed the locked launcher dependencies to releases with no `mix hex.audit` advisories.
 
 3. 🟡 First real NixOS/KVM deployment
    - ✅ Deployed the downstream `foundry` host config with a local `agent-sandcastle` override.
@@ -52,7 +56,8 @@ Tracking against PLAN.md §14 milestones. ✅ done · 🟡 partial · ⬜ not st
    - ✅ Updated M1 partial items based on what actually works on the host.
 
 4. ⬜ M2 host adapter after substrate validation
-   - Replace launcher `dry_run` lifecycle actions with a narrow host adapter for rendering VM definitions and starting/stopping systemd units.
+   - Add a root-owned broker with a narrow Unix-socket protocol for rendering VM definitions and fixed create/start/stop/status/persist-Codex-auth operations. Do not grant Phoenix direct systemd or microVM filesystem access.
+   - Resolve opaque credential IDs only inside that broker beneath a fixed staging root.
    - Add systemd/journald status reads for the launcher dashboard.
    - Add per-sandbox secret staging integration for deploy keys and agent credentials.
    - Add Codex `auth.json` persist-back-on-stop.

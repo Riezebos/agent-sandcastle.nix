@@ -30,8 +30,8 @@ defmodule AgentSandcastleLauncherWeb.SandboxShowLive do
             <dd><%= @sandbox.happy_session_name %></dd>
             <dt>QCOW2 Path</dt>
             <dd><%= @sandbox.qcow2_path %></dd>
-            <dt>Credential Path</dt>
-            <dd><%= @sandbox.agent_credential.staged_path %></dd>
+            <dt>Credential ID</dt>
+            <dd><%= @sandbox.agent_credential.credential_id %></dd>
           </dl>
         </div>
 

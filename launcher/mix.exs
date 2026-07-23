@@ -40,6 +40,7 @@ defmodule AgentSandcastleLauncher.MixProject do
       {:ecto_sql, "~> 3.12"},
       {:ecto_sqlite3, "~> 0.20"},
       {:jason, "~> 1.4"},
+      {:lazy_html, ">= 0.1.0", only: :test},
       {:phoenix, "~> 1.7"},
       {:phoenix_ecto, "~> 4.6"},
       {:phoenix_html, "~> 4.1"},

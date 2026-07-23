@@ -4,6 +4,10 @@ config :agent_sandcastle_launcher,
   ecto_repos: [AgentSandcastleLauncher.Repo],
   generators: [timestamp_type: :utc_datetime_usec]
 
+config :agent_sandcastle_launcher, :authentik,
+  required: false,
+  admin_group: "sandbox-admins"
+
 config :agent_sandcastle_launcher, AgentSandcastleLauncherWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,
@@ -16,6 +20,6 @@ config :agent_sandcastle_launcher, AgentSandcastleLauncherWeb.Endpoint,
 
 config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
-  metadata: [:request_id]
+  metadata: [:request_id, :actor]
 
 import_config "#{config_env()}.exs"

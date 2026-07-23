@@ -5,7 +5,7 @@ defmodule AgentSandcastleLauncherWeb.SandboxNewLive do
   alias AgentSandcastleLauncher.Sandboxes
 
   @impl true
-  def mount(_params, _session, socket) do
+  def mount(_params, session, socket) do
     changeset =
       Sandboxes.change_sandbox_request(%{
         "branch" => "main",
@@ -15,6 +15,7 @@ defmodule AgentSandcastleLauncherWeb.SandboxNewLive do
     {:ok,
      socket
      |> assign(:agents, Registry.list())
+     |> assign(:actor, get_in(session, ["agent_sandcastle_identity", "username"]))
      |> assign(:form, to_form(changeset, as: :sandbox_request))
      |> assign(:changeset, changeset)}
   end
@@ -31,7 +32,7 @@ defmodule AgentSandcastleLauncherWeb.SandboxNewLive do
 
   @impl true
   def handle_event("save", %{"sandbox_request" => params}, socket) do
-    case Sandboxes.create_sandbox(params) do
+    case Sandboxes.create_sandbox(params, socket.assigns.actor) do
       {:ok, sandbox} ->
         {:noreply,
          socket
@@ -53,7 +54,13 @@ defmodule AgentSandcastleLauncherWeb.SandboxNewLive do
       </div>
 
       <div class="panel">
-        <.form for={@form} phx-change="validate" phx-submit="save" class="grid">
+        <.form
+          for={@form}
+          id="sandbox-form"
+          phx-change="validate"
+          phx-submit="save"
+          class="grid"
+        >
           <label>
             Repo URL
             <input type="text" name={@form[:repo_url].name} value={@form[:repo_url].value || ""} />
@@ -80,15 +87,10 @@ defmodule AgentSandcastleLauncherWeb.SandboxNewLive do
             <.error changeset={@changeset} field={:agent_key} />
           </label>
 
-          <label>
-            Staged Credential Path
-            <input
-              type="text"
-              name={@form[:credential_path].name}
-              value={@form[:credential_path].value || ""}
-            />
-            <.error changeset={@changeset} field={:credential_path} />
-          </label>
+          <p class="muted">
+            An opaque credential ID will be generated for this dry run. Host paths are resolved
+            only by the trusted lifecycle broker.
+          </p>
 
           <button class="button" type="submit">Create Dry Run</button>
         </.form>

@@ -93,6 +93,15 @@ in
         sparingly — long-lived values belong in `environmentFile`.
       '';
     };
+
+    authentikAdminGroup = lib.mkOption {
+      type = lib.types.str;
+      default = "sandbox-admins";
+      description = ''
+        Exact Authentik group required by the launcher in addition to the
+        identity check performed by Caddy's forward_auth handler.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -117,6 +126,8 @@ in
         PHX_HTTP_IP = cfg.bindAddress;
         PORT = toString cfg.port;
         LAUNCHER_DATABASE_PATH = cfg.databasePath;
+        AUTHENTIK_REQUIRED = "true";
+        AUTHENTIK_ADMIN_GROUP = cfg.authentikAdminGroup;
         LANG = "C.UTF-8";
         LC_ALL = "C.UTF-8";
       } // cfg.extraEnvironment;
@@ -132,21 +143,26 @@ in
         ExecStart = "${cfg.package}/bin/agent_sandcastle_launcher start";
         Restart = "on-failure";
         RestartSec = "5s";
+        UMask = "0077";
 
-        # Hardening. The launcher's blast radius is the same as the host
-        # (it shells out to `microvm`/`qemu-img` and edits /var/lib/microvms),
-        # so we can't lock it down to NoNewPrivileges + ProtectSystem=strict
-        # without breaking those flows. The settings below cover what the
-        # current dry-run scope can tolerate; revisit when M2 wires the host
-        # adapter that actually starts/stops microVM units.
+        # The Phoenix process remains a dry-run control plane. It never edits
+        # microVM state or invokes systemd; those operations belong behind the
+        # future root-owned broker's narrow Unix-socket protocol.
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ReadWritePaths = [ "/var/lib/${cfg.stateDirectory}" ];
         ProtectHome = true;
         PrivateTmp = true;
+        PrivateDevices = true;
+        ProtectClock = true;
+        ProtectHostname = true;
         ProtectKernelTunables = true;
         ProtectKernelModules = true;
         ProtectKernelLogs = true;
         ProtectControlGroups = true;
         RestrictNamespaces = true;
         RestrictRealtime = true;
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
         LockPersonality = true;
         MemoryDenyWriteExecute = false; # BEAM JIT requires W+X.
       };
