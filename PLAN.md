@@ -48,16 +48,22 @@ Out of scope for v1: GitHub support, multi-tenant ownership, arbitrary unvetted 
                         │   (→ agent-sandcastle launcher)         │
                         │                                         │
                         │   ┌──────────────────────────────────┐  │
-                        │   │ agent-sandcastle launcher        │  │
-                        │   │  - GitLab OAuth + API client     │  │
-                        │   │  - deploy-key provisioner        │  │
-                        │   │  - sops-managed secret store     │  │
-                        │   │  - microvm.nix definition writer │  │
-                        │   │  - qcow2 fork helper             │  │
-                        │   │  - SQLite state                  │  │
-                        │   └──────────────────────────────────┘  │
-                        │              │                          │
-                        │   ┌──────────▼──────────────────────┐   │
+                        │   │ launcher (unprivileged Phoenix) │  │
+                        │   │  - web/API + SQLite             │  │
+                        │   │  - Authentik authorization      │  │
+                        │   │  - opaque credential UUIDs      │  │
+                        │   │  - path-free sandbox specs      │  │
+                        │   └──────────────┬───────────────────┘  │
+                        │        root:agent-sandcastle 0660       │
+                        │          systemd-owned Unix socket      │
+                        │   ┌──────────────▼───────────────────┐  │
+                        │   │ lifecycle broker (root, Go)      │  │
+                        │   │  - one process per connection    │  │
+                        │   │  - credential UUID resolution    │  │
+                        │   │  - VM definitions/qcow2/systemd  │  │
+                        │   │  - Codex auth persistence        │  │
+                        │   └──────────────┬───────────────────┘  │
+                        │   ┌──────────────▼───────────────────┐  │
                         │   │ microvm.nix VMs (one per sandbox)│  │
                         │   │  - sandbox-only /nix/store        │  │
                         │   │    (virtiofs RO, curated, never  │  │
@@ -71,14 +77,69 @@ Out of scope for v1: GitHub support, multi-tenant ownership, arbitrary unvetted 
                         └────────────────────────────────────────┘
 ```
 
-Three components, two repos:
+Four components, two repos:
 
 | Repo | Contains |
 |---|---|
 | `agent-sandcastle` (this project) | NixOS modules for the base image, sandbox VM template, launcher service; launcher source code |
 | Downstream consumer (e.g. someone's NixOS host config) | `inputs.agent-sandcastle.url = "github:…"` and a few lines wiring it up |
 
-The Happy relay is its own NixOS module shipped alongside, since it's tightly co-deployed.
+The Happy relay is its own NixOS module shipped alongside, since it's tightly
+co-deployed. The launcher and broker are deliberately separate security
+principals: Phoenix never receives host credential paths, `/dev/kvm`, sudo,
+systemd control, or write access to the microVM state tree.
+
+### Initial deployment topology and future split
+
+The first deployment co-locates the launcher, broker, microVM worker, Foundry
+VTT, Authentik, PostgreSQL, and observability on the existing Foundry host. This
+is an intentional single-user prototype topology, not a claim that arbitrary
+multi-tenant compute belongs beside the rest of the services forever.
+
+The host has enough capacity for the control plane and a small number of
+sandboxes. Start with at most two active sandboxes, all owned by explicitly
+trusted `sandbox-admins`, and only trusted/private repositories. Put the whole
+Sandcastle workload in a dedicated systemd slice with aggregate CPU, memory,
+process, file-descriptor, and I/O controls so agent builds cannot starve the
+game server, identity provider, database, backups, or monitoring.
+
+Keep the complete Sandcastle plane relocatable as one unit:
+
+- launcher
+- lifecycle broker and its Unix socket
+- credential staging root
+- microVM definitions, disks, and curated store
+- sandbox bridge and firewall
+
+Move that unit to a dedicated KVM host when access expands beyond the small
+trusted group, sandboxes execute untrusted external pull requests, more than two
+or three VMs need to run concurrently, Foundry latency becomes visible, or the
+stored code/credentials become materially valuable. Do not split it into a
+distributed system before those triggers occur. If trusted Authentik headers
+ever cross a host boundary, protect the proxy channel with a private,
+authenticated transport or replace header trust with direct token validation.
+
+Relevant primary documentation behind this decision:
+
+- [Coder external provisioners](https://coder.com/docs/admin/provisioners):
+  built-in provisioners are the default, while external provisioners isolate
+  build execution, APIs, secrets, and load when the deployment grows.
+- [Coder Agents architecture](https://coder.com/docs/ai-coder/agents/architecture):
+  separates control-plane orchestration from workspace execution, uses
+  outbound workspace connections, and keeps provider credentials out of
+  workspaces where its execution model permits.
+- [GitHub ephemeral self-hosted runners](https://docs.github.com/en/actions/reference/runners/self-hosted-runners)
+  and [GitLab runner security](https://docs.gitlab.com/runner/security/):
+  recommend disposable, isolated execution and network segmentation for
+  user-controlled jobs.
+- [microvm.nix compartmentalization](https://microvm-nix.github.io/microvm.nix/)
+  and [Firecracker production host guidance](https://github.com/firecracker-microvm/firecracker/blob/main/docs/prod-host-setup.md):
+  support VM boundaries, minimal guest stores, host-side resource controls, and
+  explicit egress filtering. Firecracker is an analogous production reference;
+  the current Sandcastle hypervisor is QEMU.
+- [systemd socket activation](https://www.freedesktop.org/software/systemd/man/252/systemd-socket-activate.html):
+  supports launching one helper instance per accepted connection, so the narrow
+  privileged broker does not need to remain resident.
 
 ## 4. Repo layout
 
@@ -90,7 +151,9 @@ agent-sandcastle/
 │   ├── sandbox.nix            # parameterised microvm template
 │   ├── sandbox-store.nix      # curated sandbox-only nix store builder
 │   ├── launcher-module.nix    # NixOS service for the launcher
+│   ├── broker-module.nix      # socket-activated privileged broker service
 │   └── happy-relay-module.nix # NixOS service for self-hosted Happy
+├── broker/                    # small Go lifecycle/credential broker
 ├── launcher/                  # Elixir (Phoenix LiveView) — see §5
 │   ├── mix.exs
 │   ├── lib/
@@ -113,8 +176,10 @@ Flake outputs:
 
 - `nixosModules.base` — installs the sandbox base image + microvm.nix runner config on the host
 - `nixosModules.launcher` — declares the launcher systemd service, Caddy snippet, sops dependencies
+- `nixosModules.broker` — declares the root-owned Unix socket and per-connection broker service
 - `nixosModules.happyRelay` — the Happy relay service
 - `packages.${system}.launcher` — the launcher binary/release for cachix
+- `packages.${system}.broker` — statically linked broker binary
 - `packages.${system}.claude-code` — Claude Code imported from `numtide/llm-agents.nix`
 - `packages.${system}.codex` — Codex imported from `numtide/llm-agents.nix`
 - `packages.${system}.happy-coder` — Happy CLI imported from `numtide/llm-agents.nix`
@@ -144,8 +209,10 @@ Rationale:
 - Ecto + SQLite (`ecto_sqlite3`) for state — one file at `/var/lib/agent-sandcastle/state.db`
 - Jason for Phoenix/Plug JSON parsing and cookie/session-backed browser flows
 - Tesla or Req for the GitLab API client
-- Custom thin wrapper over `microvm`/`qemu-img` shelling out via `Port`
-- Claude auth helper that runs `claude setup-token` in an isolated temp home and captures the resulting token into sops
+- A typed Unix-socket client for the root-owned lifecycle broker
+- Broker-mediated credential enrollment helpers that run agent login flows in
+  isolated temporary homes and return only an opaque credential UUID/status to
+  Phoenix
 - Development-only browser verification uses Rodney against a headless Chromium from the launcher dev shell.
 
 **State (SQLite)**
@@ -165,7 +232,7 @@ sandbox_deploy_keys
   expires_at, created_at
 agent_credentials
   id, sandbox_id, agent_key, auth_mode,
-  secret_sops_path, writable, last_persisted_at,
+  credential_id, writable, last_persisted_at,
   expires_at, created_at, revoked_at
 happy_sessions
   id, sandbox_id, relay_url, session_name,
@@ -173,6 +240,57 @@ happy_sessions
 audit_log
   id, sandbox_id, action, actor, ts, payload_json
 ```
+
+**Privileged lifecycle broker**
+
+Use a small Go program for the host privilege boundary. Go gives this
+I/O-heavy, protocol-oriented component a compact static binary, straightforward
+Unix-socket and peer-credential support, memory safety, fast builds, and a
+smaller operational surface than adding another VM-management framework.
+Rust would also be a strong choice but adds implementation complexity that is
+not justified by this narrow protocol. Elixir would unnecessarily place BEAM
+and launcher dependencies inside the root boundary; Python, shell, and C make
+input validation or memory safety harder to defend.
+
+The broker is not an always-running coordinator. systemd owns an
+`AF_UNIX` stream socket with owner `root`, group `agent-sandcastle`, and mode
+`0660`, then starts one hardened broker instance per accepted connection
+(`Accept=yes`). The connection is mapped to standard input/output or passed as a
+single socket descriptor. The process handles one bounded request, returns one
+bounded response, and exits.
+
+Protocol and service requirements:
+
+- Versioned, typed JSON request/response envelopes with strict decoding,
+  unknown-field rejection, maximum message size, deadlines, and bounded output.
+- Bound accepted-connection concurrency and systemd activation rate so a buggy
+  or compromised launcher cannot fan out an unbounded number of root processes.
+- A small allowlist of idempotent operations: initially `ping`, `status`, and
+  render validation; later fixed `create`, `start`, `stop`,
+  `persist-codex-auth`, `delete`, and fork/flatten operations.
+- No arbitrary command, unit name, filesystem path, Nix expression, environment
+  variable, or systemd property supplied by the caller.
+- Resolve server-generated credential UUIDs only beneath one fixed,
+  root-owned staging root. Reject symlinks, traversal, unexpected ownership,
+  mode, type, and credential shape.
+- Authenticate the local caller with the Unix peer credentials in addition to
+  socket permissions. Journal the operation, sandbox ID, authenticated web
+  actor forwarded by the launcher, result, and correlation ID without logging
+  credential contents or resolved secret paths.
+- Root-owned per-sandbox locks and idempotency keys prevent concurrent,
+  duplicated, or reordered lifecycle transitions.
+- Return batched status data so the dashboard does not create one root process
+  per row on every LiveView refresh.
+- The broker generates and validates all filesystem and systemd identifiers
+  from canonical sandbox UUIDs. It invokes fixed absolute executables with
+  fixed argument shapes and a minimal environment.
+- Apply strong systemd confinement while retaining only the exact filesystem,
+  KVM/TAP, and service-manager access required by the implemented operation.
+
+Start with `ping` plus UUID resolution tests before enabling lifecycle
+mutations. Real lifecycle activation remains blocked until Claude and Codex
+credential behavior is runtime-validated on Foundry and Codex refresh
+persistence/failure ordering is proven.
 
 **Agent registry**
 
@@ -196,10 +314,19 @@ When a sandbox is created, the launcher stores the selected `agent_key`, the res
 v1 is OAuth-only for both supported agents. API-key fallbacks are deferred so the launcher only has to reason about one credential lifecycle per agent.
 
 - `claude-code` → `claude-oauth-token` (only mode).
-  - Launcher runs a guided `claude setup-token` flow in an isolated host-side temp home, captures the resulting `sk-ant-oat01-…` token, stores it via sops, and mounts it read-only into the sandbox as `CLAUDE_CODE_OAUTH_TOKEN`. Token is valid ~1 year and is treated as an account credential (revocable from Claude.ai).
+  - A broker-mediated helper runs the launcher-guided `claude setup-token`
+    flow in an isolated temporary home, persists the token, and returns only
+    status plus an opaque UUID. The staged credential is mounted read-only into
+    the sandbox as `CLAUDE_CODE_OAUTH_TOKEN`. It is treated as a high-value
+    account credential revocable from Claude.ai.
   - The wrapper never passes `claude --bare` (which ignores `CLAUDE_CODE_OAUTH_TOKEN`).
 - `codex` → `codex-chatgpt-oauth` (only mode).
-  - Launcher runs a guided `codex login` flow on the host, captures the resulting `~/.codex/auth.json`, stores it via sops, and mounts it into the sandbox as a **writable** per-VM file at `/home/dev/.codex/auth.json`. Codex refreshes the session token in-place during use; the launcher persists the refreshed file back to sops on VM stop so the next boot picks up the latest tokens.
+  - A broker-mediated helper runs the launcher-guided `codex login` flow in an
+    isolated `CODEX_HOME`, persists the resulting `auth.json`, and returns only
+    status plus an opaque UUID. It is mounted into the sandbox as a
+    **writable** per-VM file at `/home/dev/.codex/auth.json`. Codex refreshes
+    the session token in place; the broker validates and persists it after the
+    VM has stopped.
   - One `auth.json` per sandbox. Forks always trigger a fresh `codex login` so each sandbox has an independent, individually revocable session — mirroring the Claude OAuth fork policy.
 
 **HTTP/UI surface**
@@ -269,15 +396,43 @@ Self-hosted-only quirks worth surfacing:
    - Resolve project id via `GET /projects?search=...`.
    - Verify the authenticated GitLab user can manage deploy keys for the selected project (Maintainer or Owner) and that the connected user is the configured service account.
    - Check default branch protection state.
-4. Launcher generates a fresh per-sandbox `ed25519` SSH keypair on the host.
-5. Launcher creates a project deploy key via `POST /projects/:id/deploy_keys` with `can_push=true`, a descriptive title, and an expiry. The private key is written via sops and never logged. The deploy key is **not** added to any protected-branch `allowed_to_push` rule — doing so would grant the service account direct push to protected branches.
-6. Launcher resolves the selected agent registry entry and materializes the OAuth credential:
-   - For `claude-code`, run a guided `claude setup-token` flow in an isolated host-side temp home, show the login URL/code in the web UI, capture the resulting token, and write it to sops at `agent-credentials/<sandbox>/claude-code-oauth-token`. Read-only mount.
-   - For `codex`, run a guided `codex login` flow in an isolated host-side `CODEX_HOME`, capture the resulting `auth.json`, and write it to sops at `agent-credentials/<sandbox>/codex-chatgpt-auth-json`. The host stages the file into a per-VM **writable** dir before boot so Codex can refresh tokens in place; on VM stop, the launcher copies the refreshed `auth.json` back into sops.
+4. Launcher asks the broker to generate a fresh per-sandbox `ed25519` SSH
+   keypair. The broker persists the private key and returns the public key,
+   fingerprint, and an opaque credential UUID—never a private-key path.
+5. Launcher creates a project deploy key via
+   `POST /projects/:id/deploy_keys` with the returned public key,
+   `can_push=true`, a descriptive title, and an expiry. The deploy key is
+   **not** added to any protected-branch `allowed_to_push` rule—doing so would
+   grant the service account direct push to protected branches.
+6. Launcher resolves the selected agent registry entry and requests a guided
+   credential-enrollment operation. A root-owned helper runs the login in an
+   isolated temporary home, persists the material, and returns only an opaque
+   credential UUID/status to Phoenix:
+   - For `claude-code`, run `claude setup-token`, surface only the login
+     URL/code through the UI, and persist the captured token as the read-only
+     Claude credential.
+   - For `codex`, run `codex login` with an isolated `CODEX_HOME` and persist
+     the resulting `auth.json`. The broker stages it into a per-VM **writable**
+     directory before boot so Codex can refresh tokens in place; on VM stop,
+     the broker validates and persists the refreshed file.
 7. Launcher generates a unique Happy session name (for example `<sandbox-name>-<short-id>`).
-8. Launcher generates microvm definition (Nix file) under `/var/lib/agent-sandcastle/vms/<name>.nix`, including repo metadata, branch, deploy-key secret path, `agent_key`, `agent_auth_mode`, resolved `agent_command`, agent credential mount (RO for Claude, RW for Codex), Happy relay URL, and Happy session name.
-9. Launcher creates per-sandbox qcow2: `qemu-img create -f qcow2 -F qcow2 -b base.qcow2 <name>.qcow2`. The explicit `-F` is required to avoid backing-file format probing, which libvirt rejects and which is a known footgun if a writable backing file is ever introduced.
-10. Launcher drops the rendered VM definition into `/var/lib/microvms/<name>/` and starts the unit via `systemctl start microvm@<name>`. A systemd-path watcher reconciles definitions; we do **not** run `nixos-rebuild switch` per sandbox — that's tens of seconds of overhead and unnecessary churn.
+8. Launcher renders and stores a path-free Nix function whose
+   `credentialSource` argument is unresolved for preview and audit. It sends
+   the broker only typed create fields: canonical sandbox UUID, opaque
+   credential UUID, allowlisted agent key, repo metadata, and attribution. The
+   preview Nix text is not a broker protocol input, and Phoenix never sends or
+   receives a host credential path.
+9. Broker validates the request and resolves the credential UUID beneath its
+   fixed root-owned staging root. It independently materializes the final
+   definition from a broker-owned template and the typed fields, supplies the
+   resolved `credentialSource`, validates the result, and writes VM state
+   beneath the broker-owned Sandcastle tree. A compromised launcher cannot ask
+   the broker to evaluate arbitrary Nix text.
+10. Broker creates the per-sandbox qcow2 with an explicit backing format:
+    `qemu-img create -f qcow2 -F qcow2 -b base.qcow2 <name>.qcow2`. It then
+    starts the allowlisted `microvm@<derived-name>` unit. No request may supply
+    an arbitrary path or systemd unit name, and no per-sandbox
+    `nixos-rebuild switch` is performed.
 11. VM boots. First-boot service inside VM:
    - Reads the sandbox deploy-key private key from the per-VM secrets dir (virtiofs-mounted from a host-side staged dir, **not** from `/run/secrets` directly — see §11).
    - Reads only the selected agent credential from the same per-VM secrets dir. For Codex, the mount is writable.
@@ -305,14 +460,27 @@ Deploy keys are the narrow v1 Git credential: Git over SSH only, scoped to one p
 **Backing-chain depth.** Fork is O(1) at creation, but read I/O cost grows with chain depth because every read may walk every parent. The launcher tracks chain depth in SQLite and runs an offline `qemu-img rebase` / `commit` flatten when depth exceeds 4 (configurable). Flattening requires the descendant to be stopped. The UI shows current chain depth on the sandbox detail page.
 
 ### Stop / Delete
-- **Stop**: shut down VM, persist any writable agent credential (e.g. refreshed Codex `auth.json`) back to sops, keep qcow2 + deploy key.
-- **Delete**: shut down VM; delete the GitLab deploy key; remove the private key secret; remove any per-sandbox agent credential secret (and document the provider-side revocation step, since deleting local state does not invalidate an already-issued OAuth token); remove Happy session state; remove the microvm unit definition; remove qcow2.
+- **Stop**: broker requests a graceful VM stop, waits for a proven stopped
+  state, validates and persists any writable agent credential (notably refreshed
+  Codex `auth.json`) back to its durable credential record, then reports stop
+  success. If persistence fails, report a failed/quarantined transition rather
+  than claiming success or restarting from stale auth. Keep qcow2 + deploy key.
+- **Delete**: after the broker proves the VM stopped, the launcher deletes the
+  GitLab deploy key and the broker removes the corresponding private key,
+  per-sandbox agent credential, Happy runtime state, VM definition, and qcow2.
+  Document the provider-side revocation step because deleting local state does
+  not invalidate an already-issued OAuth token.
 - **Hard-block delete on a parent that has live (non-deleted) children.** Deleting a parent silently breaks the children's backing chain. The launcher refuses the operation and surfaces a "flatten children first" action.
 
 ### Deploy key rotation
-- Deploy keys can expire. A daily systemd timer walks deploy keys approaching expiry, creates replacement keys, writes them via sops, stages them into the per-VM secrets dir, and deletes the old GitLab deploy key.
+- Deploy keys can expire. A daily systemd timer identifies keys approaching
+  expiry. The broker generates and stages replacement private keys, while the
+  launcher registers/revokes the corresponding GitLab public deploy keys.
 - Because secrets are virtiofs-mounted, a rotation requires a sandbox VM **restart** to take effect — virtiofs does not propagate sops remounts to the guest (see §11). The rotation timer schedules a restart of each affected VM after key rollover.
-- To invalidate a deleted or suspected-leaked sandbox credential immediately, the launcher deletes the GitLab deploy key and removes the private key secret. The corresponding sandbox VM is killed (not gracefully shut down) so an in-flight `git push` can't race the revocation.
+- To invalidate a deleted or suspected-leaked sandbox credential immediately,
+  the launcher deletes the GitLab deploy key and asks the broker to kill the
+  VM and remove the private credential. Killing precedes local removal so an
+  in-flight `git push` cannot race the revocation.
 
 ## 7. Base image (`nix/base-image.nix`)
 
@@ -405,12 +573,26 @@ Guest modules declare host-side work by attaching stable tags to `microvm.shares
 ## 9. Networking and isolation
 
 - Each sandbox gets its own tap interface and IP on a private bridge (`br-sandboxes`).
-- Host runs nftables NAT for egress; **explicit drop** for any traffic destined for the host's own loopback or other host services.
-- No sandbox can reach Authentik, Postgres, the launcher, the curated sandbox store builder, or another sandbox. Lateral movement = blocked.
+- Host runs nftables NAT for egress. Before lifecycle activation, add an
+  unconditional drop for traffic destined for the host, loopback, LAN/private
+  and link-local ranges, management services, and other sandbox interfaces.
+- Required end state: no sandbox can reach Authentik, PostgreSQL, the launcher,
+  the curated-store builder, host management services, or another sandbox.
 - **Egress allowlist is on by default in v1.** Default allowed: provider endpoints for the selected agent (`*.anthropic.com` for Claude, `*.openai.com` / `chatgpt.com` for Codex), the configured GitLab instance (both `services.agent-sandcastle.gitlab.baseUrl` and `sshHost`, which may differ for self-hosted installs), the Happy relay (`happy.example.com`), and a small set of language registries (`registry.npmjs.org`, `pypi.org`, `crates.io`, `proxy.golang.org`). Anything else is dropped. Self-hosted GitLab installs that mirror packages on internal hostnames (`packages.gitlab.example.com`, container registries, etc.) declare those alongside the base URL in the module options.
-- **Enforcement is host-side, not in-VM.** The allowlist is implemented in nftables on the host (matching tap interface + destination IP/SNI), not as a guest-side iptables rule, so a compromised guest cannot rewrite its own firewall. An optional forward proxy (Squid/Envoy in CONNECT-only mode) can be enabled for SNI-aware allowlisting and per-request logging; the launcher exposes a toggle but the in-kernel allowlist is the baseline.
+- **Enforcement is host-side, not in-VM.** The current allowlist is implemented
+  in nftables on the host, matching sandbox interfaces and destination IPs, so
+  a compromised guest cannot rewrite its own firewall. It resolves exact
+  configured hostnames to IPv4/IPv6 sets during allowlist refresh; it does not
+  enforce DNS names, wildcard domains, TLS SNI, or HTTP Host at packet time. An
+  optional forward proxy may later add name-aware policy and request logging.
 - Per-sandbox extensions to the allowlist are declared in the microvm definition and reconciled into nftables; ad-hoc runtime mutations are not supported.
-- Status: this is still a required v1 behavior, not a verified implementation. The current repo has not yet built or integration-tested the host nftables allowlist.
+- The bridge, DHCP/DNS, NAT, TAP attachment, curated-store boot, allowed OpenAI
+  destination, and blocked unlisted destination have been runtime-validated on
+  Foundry. Before lifecycle activation, add explicit rules that block guest
+  access to the host, loopback, other sandboxes, LAN/private ranges, link-local
+  addresses, and management services regardless of resolved allowlist entries.
+- Place all VMs in a dedicated systemd slice and apply aggregate concurrency,
+  CPU, memory, process, file-descriptor, log, disk-growth, and I/O limits.
 - Limitation: a domain-allowlist firewall does not prevent exfiltration *through* an allowed domain (e.g. pushing to a GitLab branch). That risk is mitigated by branch protection (§12) and per-sandbox deploy keys, not by the firewall.
 
 ## 10. Happy integration and relay
@@ -448,13 +630,19 @@ The relay is **not** the agent. It forwards encrypted blobs. The VM-side Happy s
 - For `claude-oauth-token`, the wrapper exports `CLAUDE_CODE_OAUTH_TOKEN` from the read-only mounted secret and clears any inherited `~/.claude/.credentials.json` before startup. The wrapper never passes `claude --bare` (which ignores `CLAUDE_CODE_OAUTH_TOKEN`).
 - For `codex-chatgpt-oauth`, the wrapper sets `CODEX_HOME=/home/dev/.codex` and ensures `/home/dev/.codex/auth.json` is the writable virtiofs-mounted file from the host. Codex refreshes the session token in place during normal use.
 - The Happy session name is generated by the launcher and stored in SQLite so the dashboard can display the exact mobile session to open.
-- Restarting the Happy session is a launcher action that restarts only `happy-session.service`, not the whole VM.
-- On VM stop, a oneshot `codex-auth-persist.service` on the host copies the latest `auth.json` for that sandbox back into sops, so the next boot picks up the freshly refreshed tokens.
+- Restarting the Happy session is a launcher action implemented by a fixed
+  broker operation that restarts only the derived `happy-session.service`, not
+  the whole VM.
+- On VM stop, the broker coordinates a root-owned persist helper that validates
+  and writes the latest `auth.json` for that sandbox back to durable encrypted
+  storage, so the next boot receives the refreshed tokens.
 - Forks always receive a new Happy session name and reset inherited Happy and agent runtime state before the child service starts. This keeps mobile sessions, device bindings, OAuth caches, and relay state independent even though the qcow2 disk inherits repo and shell state.
 
 ## 11. Secrets management
 
-The launcher manages secrets via `sops-nix` on the host:
+The unprivileged launcher manages credential metadata and opaque UUIDs. Host
+paths, staging, and credential material are owned by the broker and supporting
+root-only units. Long-lived encrypted storage uses `sops-nix` on the host:
 
 - `agent-credentials/<name>/claude-code-oauth-token` — per-sandbox Claude Code OAuth token from the launcher-guided `claude setup-token` flow (read-only mount).
 - `agent-credentials/<name>/codex-chatgpt-auth-json` — per-sandbox Codex `auth.json` from the launcher-guided `codex login` flow. Staged into a per-VM writable file before boot; persisted back into sops on VM stop.
@@ -465,11 +653,20 @@ The launcher manages secrets via `sops-nix` on the host:
 - `happy-seed` — relay token-generation seed (exported to the relay unit as `SEED`).
 - `sandbox-deploy-keys/<name>` — per-sandbox SSH deploy-key private key.
 
-Sandbox VMs do **not** have access to host sops keys. They only see their own staged secret directory: the per-sandbox deploy key plus exactly one OAuth credential for the selected agent.
+Sandbox VMs do **not** have access to host sops keys. They only see their own
+staged secret directory: the per-sandbox deploy key plus exactly one OAuth
+credential for the selected agent. Credential staging is excluded from backups,
+logs, rendered Nix text, and launcher-visible filesystem paths.
 
 **virtiofs + sops staging.** Mounting `/run/secrets` directly into a guest is unsafe in this stack: every `nixos-rebuild switch` (including auto-updates) remounts `/run/secrets` on the host, which makes the guest mount appear empty until the VM is rebooted ([microvm.nix issue #239](https://github.com/microvm-nix/microvm.nix/issues/239)). v1 mitigates this with two measures:
 - Set `sops.keepGenerations = 0` so old generations aren't churned out from under live mounts.
-- Stage each VM's secrets into a dedicated, per-VM directory `/var/lib/agent-sandcastle/secrets/<name>/` using a oneshot `sandbox-secrets-stage@<name>.service` that copies the relevant decrypted sops files in with `0400` mode owned by the host's `microvm` user. The microvm definition's virtiofs share points at this staged dir, **not** at `/run/secrets`. The staging service is a dependency of `microvm@<name>.service`.
+- Stage each VM's secrets into a dedicated per-VM directory beneath one fixed,
+  root-owned staging root. Only the broker maps an opaque UUID to that path,
+  using beneath/no-symlink semantics and ownership/mode/type validation. A
+  oneshot staging unit copies the relevant decrypted sops files with the
+  minimum permissions needed by the selected microVM share. The VM definition
+  receives the path through its `credentialSource` function argument and never
+  embeds a caller-supplied path. It does **not** mount `/run/secrets`.
 
 Trade-off: secret rotation (deploy keys, Claude OAuth tokens) requires re-staging and a sandbox restart; live propagation is not supported. The deploy-key rotation timer in §6 already accounts for this.
 
@@ -481,7 +678,12 @@ Claude and Codex OAuth credentials are treated as high-value account credentials
 
 **Storage vs delivery.** Storage is uniform: every secret is a sops-encrypted file on the host, decrypted into the per-VM staged directory at boot. Delivery shape depends on the secret:
 
-- **Env-shaped secrets** (e.g. `CLAUDE_CODE_OAUTH_TOKEN`, future `DATABASE_URL`) are loaded into the agent's process tree via systemd's `EnvironmentFile=` directive on `happy-session.service`. The launcher renders one or more `KEY=VAL` files into the staged dir; the unit references them by path. Values never appear in the rendered unit (so they don't end up in the qcow2 disk or in `journalctl --user-unit` arguments), and a secret rotation just re-stages the file and restarts the unit.
+- **Env-shaped secrets** (e.g. `CLAUDE_CODE_OAUTH_TOKEN`, future
+  `DATABASE_URL`) are loaded into the agent's process tree via systemd's
+  `EnvironmentFile=` directive on `happy-session.service`. The root-owned
+  staging helper renders one or more `KEY=VAL` files into the staged directory;
+  the unit references them by path. Values never appear in launcher-visible
+  rendered text, the qcow2 disk, or unit arguments.
 - **File-shaped secrets** (e.g. Codex `~/.codex/auth.json`, deploy-key private key, future TLS certs) stay as bind-mounted files. Codex specifically *requires* a writable file because it refreshes the token in place; an env var couldn't carry the rewrite.
 - **Interactive shell exposure is opt-in per secret.** By default, `EnvironmentFile=`-loaded secrets are visible only to the agent process tree, not to ad-hoc `bash` or `tmux` shells the user opens via `mosh`/`ssh`. A per-secret "expose to interactive shells too" toggle, when enabled, additionally drops the file into a `direnv`-loaded `.envrc` so it's available in the repo's working shell. Default off because every interactive command (and every tool the agent shells out to) inherits the env, widening the leakage surface.
 
@@ -489,7 +691,9 @@ Claude and Codex OAuth credentials are treated as high-value account credentials
 
 - A new SQLite table `sandbox_user_secrets (id, sandbox_id, key, sops_path, exposed_to_shells, created_at, updated_at, revoked_at)`.
 - UI surface at `/sandboxes/:id/secrets` for create/update/delete, with a clear warning that values are visible to the agent and to anything it spawns.
-- The launcher concatenates per-sandbox user secrets into a single `user-secrets.env` file in the staged dir; `happy-session.service` references both `agent-credentials.env` and `user-secrets.env` via `EnvironmentFile=`.
+- The broker's staging helper concatenates per-sandbox user secrets into a
+  single `user-secrets.env` file; `happy-session.service` references both
+  `agent-credentials.env` and `user-secrets.env` via `EnvironmentFile=`.
 - Same rotation model: edit value → re-stage → restart `happy-session.service` (no VM reboot required for env-shaped secrets, since the staging path is per-VM and we only touch the agent unit).
 - File-shaped user secrets (e.g. a TLS keypair, a `.pgpass`) get a separate UI affordance with explicit mount path; deferred until env-shaped secrets are in production.
 
@@ -524,7 +728,16 @@ Document the recipe in `docs/operations.md` so users understand:
 
 **Out of scope (acknowledged)**
 - Targeted kernel exploit from inside a microvm — possible but exotic; mitigated by keeping the host kernel patched.
-- Compromise of the launcher itself — same blast radius as a host compromise. Don't run untrusted code in the launcher.
+- Compromise of the launcher or forged trusted-proxy headers: application-level
+  Authentik username plus `sandbox-admins` checks limit normal access, and the
+  loopback-only listener prevents external clients from bypassing Caddy.
+  Launcher compromise can submit requests as its Unix-socket identity, so the
+  broker protocol must remain narrow and independently validate all identifiers
+  and transitions; it must not become an arbitrary root command/path oracle.
+- Hypervisor or host-kernel escape remains a host compromise. On the initial
+  shared Foundry deployment that blast radius includes Foundry VTT, Authentik,
+  PostgreSQL, monitoring, and locally available secrets. This is accepted only
+  for the trusted, low-concurrency prototype topology described in §3.
 - Exfiltration through allowed domains (e.g. pushing data into a public branch on GitLab): not blocked by the egress allowlist. Mitigated by branch protection, CODEOWNERS approval gating, and per-sandbox deploy keys, but a determined prompt-injection attacker can still abuse GitLab's normal write surface.
 - Anthropic policy shifts on third-party OAuth: v1 depends on `claude setup-token` and `codex login` continuing to be supported flows. If either is restricted, the launcher would need to fall back to an API-key path (currently a v2 item).
 
@@ -554,10 +767,26 @@ Full doc lives at `docs/threat-model.md`.
 **M2 — Launcher MVP**
 - Phoenix app skeleton + SQLite + Caddy/Authentik integration
 - Launcher dev workflow includes Mix checks plus a Rodney browser smoke test of the dashboard/create/detail flow.
+- Application-level Authentik identity and `sandbox-admins` authorization,
+  audited create attribution, and a loopback-only hardened launcher service
+- Opaque server-generated credential UUIDs and path-free rendered sandbox
+  functions; browser/API requests never accept host credential paths
+- Socket-activated Go lifecycle broker with strict typed protocol, Unix peer
+  authentication, root-owned per-sandbox locking, UUID-only credential
+  resolution beneath a fixed staging root, and broker contract/adversarial tests
 - Register repo flow with GitLab service-account OAuth and coding-agent picker (auth mode is implicit per agent)
-- Launcher-guided `claude setup-token` and `codex login` flows, stored per sandbox via sops
-- Materialize per-sandbox SSH deploy keys
-- Render microvm definition into `/var/lib/microvms/<name>/` and start via systemd-path watcher (no `nixos-rebuild` per sandbox)
+- Broker-mediated, launcher-guided `claude setup-token` and `codex login`
+  flows, stored per sandbox while exposing only opaque credential UUIDs to
+  Phoenix
+- Broker-generated per-sandbox SSH private keys; launcher registers only their
+  public keys with GitLab
+- Broker materializes the path-free microVM definition and performs fixed
+  create/start/stop/status operations; Phoenix never writes the microVM tree or
+  receives systemd, KVM, sudo, or host-filesystem privileges
+- Proven stop ordering for writable Codex auth: stop VM, validate/persist
+  refresh, then report success; quarantine and surface failures
+- Dedicated Sandcastle systemd slice, maximum-two initial concurrency, bounded
+  logs/storage, and explicit host/LAN/lateral network denies
 - Live dashboard with VM status, Happy session status, restart session, stop/delete, chain-depth display
 
 **M3 — Forking + devenv UX**
@@ -579,6 +808,12 @@ Full doc lives at `docs/threat-model.md`.
 - **Base image** — the read-only NixOS closure used as the sandbox root.
 - **Curated sandbox store** — the single host-side chroot store (`/var/lib/agent-sandcastle/store`) populated from explicit closure roots: VM toplevels, enabled agent/Happy packages, and the required microvm runner closures. It is served through a tagged literal `/nix/store` virtiofs source whose daemon sees a private bind mount of the curated store; the guest mounts that share at `/nix/.ro-store` and microvm.nix binds or overlays it into `/nix/store`. The host's main `/nix/store` is never exposed to sandboxes.
 - **Launcher** — the web app that orchestrates everything.
+- **Lifecycle broker** — the socket-activated, root-owned Go helper that
+  resolves opaque credential UUIDs, owns VM filesystem mutations, and performs
+  only allowlisted lifecycle operations. It handles one request per process and
+  is not a general-purpose root daemon.
+- **Credential ID** — a server-generated opaque UUID stored by the launcher.
+  Only the broker may resolve it beneath the fixed credential staging root.
 - **Relay** — the self-hosted Happy server that forwards encrypted mobile↔sandbox traffic.
 - **Agent profile** — an allowlisted launcher entry mapping a UI choice (`claude-code`, `codex`) to a concrete VM command and required OAuth credential surface.
 - **Agent auth mode** — the credential strategy for the selected agent; v1 is OAuth-only: `claude-oauth-token` for Claude, `codex-chatgpt-oauth` for Codex.

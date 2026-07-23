@@ -19,6 +19,13 @@ Tracking against PLAN.md §14 milestones. ✅ done · 🟡 partial · ⬜ not st
 - ✅ Manual qcow2 `-F qcow2` backing-file fork demo
 
 ## M2 — Launcher MVP — 🟡 dry-run scaffold started
+- ✅ Launcher security boundary: opaque credential UUIDs, path-free rendered Nix
+  functions, Authentik username plus `sandbox-admins` authorization, audited
+  dry-run creation, and hardened loopback-only Phoenix service, committed and
+  pushed as `2648bf1`
+- ✅ Real x86_64 Linux launcher dependency hash derived and committed; launcher
+  release, example host toplevel, and full flake checks pass on Linux
+- ⬜ Socket-activated root lifecycle broker
 ## M3 — Forking + devenv UX — ⬜ not started
 ## M4 — Happy relay module + end-to-end — ⬜ not started
 
@@ -33,7 +40,9 @@ Tracking against PLAN.md §14 milestones. ✅ done · 🟡 partial · ⬜ not st
    - ✅ Scaffolded `launcher/` as a Phoenix LiveView app.
    - ✅ Added SQLite schema for `sandboxes`, `agent_credentials`, and `happy_sessions`.
    - ✅ Added a read-only agent registry for `claude-code` and `codex`.
-   - ✅ Built a create-sandbox form for repo URL, branch, agent, and staged credential path.
+   - ✅ Built the initial create-sandbox form for repo URL, branch, agent, and a
+     staged credential path; the later security-boundary pass removed that path
+     and replaced it with a server-generated opaque credential UUID.
    - ✅ Persisted sandbox records and rendered the intended VM config/spec without starting systemd or microvms.
    - ✅ Added a dashboard/detail flow showing sandbox records, selected agent, generated Happy session name, and rendered VM parameters.
    - ✅ Added `devShells.x86_64-linux.launcher`, repo-local Hex/Mix caches, `checks.x86_64-linux.launcher-syntax`, `mix.lock`, and a passing `mix test` run.
@@ -46,24 +55,87 @@ Tracking against PLAN.md §14 milestones. ✅ done · 🟡 partial · ⬜ not st
    - ✅ Tightened the Phoenix unit for its still-dry-run scope with `NoNewPrivileges`, `ProtectSystem=strict`, a private device view, and a state-directory-only write boundary.
    - ✅ Refreshed the locked launcher dependencies to releases with no `mix hex.audit` advisories.
 
-3. 🟡 First real NixOS/KVM deployment
+3. 🟡 First real NixOS/KVM and launcher deployment
    - ✅ Deployed the downstream `foundry` host config with a local `agent-sandcastle` override.
    - ✅ Verified `br-sandboxes`, TAP attachment, DHCP/DNS, NAT, and nftables egress behavior from inside the guest.
    - ✅ Booted the smoke VM against the curated store and confirmed the guest sees only the curated `/nix/store`.
    - ✅ Added `nodejs` to the sandbox base image and Happy service `PATH`; verified Node/npm plus `O_TMPFILE` on `/tmp`, `/var/tmp`, and `/home/dev/.cache`.
+   - ✅ Derived the real Linux Mix dependency hash
+     `sha256-Hjluglh8h1zDt1UCOARgXiasEAIDUNr7nxX94QxsZ2U=` and pushed upstream
+     commit `414b60b9647dbaa68ce97b121dd07be873ef2438`.
+   - ✅ On x86_64 Linux, passed launcher formatting, 10 tests with zero
+     failures, `mix hex.audit`, the launcher build, the example launcher host
+     toplevel build, and `nix flake check`.
+   - ✅ Updated the downstream lock and Authentik/Caddy boundary comment and
+     pushed `07b28baae760ee0655e7d519ee8951ba92bca7e0`.
+   - ✅ Downloaded Foundry VTT Linux 14.359, verified SHA-256
+     `c3e535264274bb9092234aedc7b1e945b4767ca62f9b9da1e088a19beabee9b5`,
+     and seeded it into the local Nix store so the full downstream build could
+     complete.
+   - 🟡 Downstream `main` deployment was triggered; final activation and
+     post-deploy service/migration/HTTP verification are being tracked
+     separately and must not be inferred from the successful build.
    - ⬜ Runtime-test the Claude read-only token env file mount with a real staged credential.
    - ⬜ Runtime-test the Codex writable `auth.json` mount and token refresh behavior.
    - ✅ Updated M1 partial items based on what actually works on the host.
 
 4. ⬜ M2 host adapter after substrate validation
-   - Add a root-owned broker with a narrow Unix-socket protocol for rendering VM definitions and fixed create/start/stop/status/persist-Codex-auth operations. Do not grant Phoenix direct systemd or microVM filesystem access.
-   - Resolve opaque credential IDs only inside that broker beneath a fixed staging root.
+   - Implement a small Go broker. Go is the selected balance for a narrow,
+     I/O-heavy privileged boundary: a compact static binary, straightforward
+     Unix sockets and peer credentials, memory safety, and low deployment
+     overhead. Rust remains a defensible higher-complexity alternative; Elixir,
+     Python, shell, and C are not preferred inside this root boundary.
+   - Let systemd own a `root:agent-sandcastle` mode `0660` Unix stream socket
+     and start one hardened broker process per connection (`Accept=yes`). No
+     always-running broker daemon or job-directory watcher is needed at the
+     current scale.
+   - Begin with `ping`, protocol framing, peer authentication, limits, and
+     credential-resolution tests before exposing mutations.
+   - Use versioned strict JSON, reject unknown fields, cap request/response
+     sizes, set deadlines, and accept only fixed typed operations. Never accept
+     an arbitrary command, unit name, path, Nix expression, environment
+     variable, or systemd property.
+   - Resolve opaque credential IDs only inside the broker beneath a fixed
+     root-owned staging root. Reject traversal, symlinks, unexpected
+     ownership/mode/type, malformed UUIDs, and mismatched credential shapes.
+   - Derive all unit names and filesystem paths from canonical sandbox UUIDs.
+     Add root-owned per-sandbox locks, idempotency keys, and audit correlation
+     IDs. Authenticate with Unix peer credentials in addition to socket mode.
+   - Add fixed create/start/stop/status/persist-Codex-auth operations. Batch
+     status requests so LiveView polling does not spawn one root process per
+     table row.
+   - Prove Codex failure ordering: VM stopped first, refreshed auth validated
+     and persisted second, success reported last. Persistence failure must
+     produce a failed/quarantined state rather than stale-auth restart.
+   - Do not grant Phoenix direct systemd, KVM, sudo, credential-path, or
+     microVM filesystem access.
    - Add systemd/journald status reads for the launcher dashboard.
    - Add per-sandbox secret staging integration for deploy keys and agent credentials.
-   - Add Codex `auth.json` persist-back-on-stop.
    - Add GitLab service-account OAuth and deploy-key provisioning only after the VM lifecycle path is stable.
 
-5. ⬜ Later M3/M4 work
+5. ⬜ Shared-host operational guardrails
+   - Keep the initial Foundry deployment to trusted `sandbox-admins`, trusted or
+     private repositories, and at most two simultaneously active sandboxes.
+   - Put all Sandcastle services/VMs in a dedicated systemd slice with aggregate
+     CPU, memory, process, file-descriptor, log, disk-growth, and I/O limits.
+     Reserve capacity for Foundry VTT, Authentik, PostgreSQL, monitoring, and
+     backups; tune actual values from runtime measurements.
+   - Add unconditional nftables denies from guests to the host, loopback, other
+     sandboxes, LAN/RFC1918, link-local, metadata, and management services.
+     Keep sandbox inbound ports closed by default.
+   - Exclude credential staging from backups and logs. Add a launcher/broker
+     kill switch that prevents new starts without disrupting the other Foundry
+     services.
+   - Keep launcher, broker, credentials, VM state/store, and sandbox networking
+     relocatable as one Sandcastle plane. Move the whole plane to a dedicated
+     KVM host when users become less trusted, external PRs are routine, more
+     than two or three VMs run concurrently, Foundry latency appears, or
+     code/credentials become materially valuable.
+   - If Authentik identity crosses hosts later, protect the proxy channel with a
+     private authenticated transport or validate tokens directly; do not extend
+     the current loopback trusted-header assumption over an ordinary network.
+
+6. ⬜ Later M3/M4 work
    - Implement qcow2 fork action with backing-chain tracking and flatten policy.
    - Add devenv detection/template UX.
    - Add deploy-key rotation and branch-protection helper.
@@ -82,10 +154,23 @@ Tracking against PLAN.md §14 milestones. ✅ done · 🟡 partial · ⬜ not st
 - Installed Hex/Rebar into ignored repo-local caches, fetched launcher dependencies, committed `launcher/mix.lock`, and verified `mix format --check-formatted` plus `mix test`.
 - Verified launcher syntax with `nix build --no-link .#checks.x86_64-linux.launcher-syntax`.
 - Confirmed the `mix release` artifact built through `pkgs.beamPackages.mixRelease` runs `AgentSandcastleLauncher.Release.migrate()` against an ephemeral SQLite path (53 KiB DB created with all migrations applied) and verified the resulting NixOS host config builds via `nix build --no-link "path:$PWD#checks.x86_64-linux.example-launcher-host-toplevel"`.
-- `fetchMixDeps` hash currently `sha256-u47tIYiqTU2UAn4WlQrrNcOBi7vFVo9Qh8e0f59Jlxw=`; refresh it whenever `launcher/mix.lock` changes.
+- `fetchMixDeps` hash currently
+  `sha256-Hjluglh8h1zDt1UCOARgXiasEAIDUNr7nxX94QxsZ2U=`; refresh it whenever
+  `launcher/mix.lock` changes.
 - Used `rodney --help`, then Rodney against headless Chromium to test the launcher UI. Covered dashboard load, LiveView connection, `/sandboxes/new`, sequential Codex form entry, submit, detail-page rendered `mkSandbox` spec, dashboard row rendering, desktop/mobile no-horizontal-overflow assertions, accessibility lookup for "Rendered VM Spec", and screenshots under ignored `.cache/`.
 - Rodney caught useful runtime gaps that unit tests missed: missing `Jason`, too-short dev/test `secret_key_base`, missing LiveView client JS for `phx-submit`, missing `inotify-tools` for LiveReload, and a LiveView testing pattern issue where parallel field input can race validation patches.
 - First real KVM smoke deployment on `foundry` succeeded with local downstream wiring that imports `nixosModules.host` and defines a non-autostart `sandcastle-smoke` microVM. The runtime fixes from that pass were: scripted bridge/dnsmasq networking instead of enabling host-wide `systemd-networkd`, explicit TAP attachment after microvm TAP creation, `mkSandbox` CPU/memory values that downstream hosts can actually override, and allowlist refresh using `pkgs.getent` on `PATH`.
 - Foundry runtime observations: `br-sandboxes` uses `10.88.0.1/24`; dnsmasq leased `10.88.0.176` to `sandcastle-smoke`; QEMU launched with `-enable-kvm`; `microvm-virtiofsd@sandcastle-smoke` served `/nix/store` from the curated chroot via the `agent-sandcastle-curated-store` tag; the guest saw its own toplevel in `/nix/store` and did not see the foundry host toplevel.
 - Guest smoke checks after adding `nodejs`: `/nix/store` is `virtiofs`, `/tmp`, `/var/tmp`, and `/home/dev/.cache` are `tmpfs`, Node `v22.22.2` and npm `10.9.7` are on `PATH`, and a Node `O_TMPFILE` probe succeeds on all three scratch mounts.
 - Egress smoke checks from the guest: `https://api.openai.com` connects through the dynamic nftables allowlist (`curl` returned HTTP 421), while `https://example.com` is rejected (`curl` exit 7). The dynamic IPv6 set currently includes some IPv4-mapped `::ffff:*` results from `getent ahostsv6`; harmless in this smoke test, but worth filtering later for tidier nft state.
+- Architecture review against Coder, GitHub/GitLab self-hosted runners,
+  microvm.nix, Firecracker production guidance, and systemd socket activation
+  supports the current phased approach: co-locate the small trusted prototype,
+  keep execution ephemeral/per-user and network-segmented, preserve a clean
+  control-plane/worker boundary, and move the complete Sandcastle plane when
+  the trust or load triggers above are reached.
+- The number of services on Foundry is not itself the limiting concern. Caddy,
+  Authentik, PostgreSQL, monitoring, backups, and CrowdSec form a coherent
+  hosting platform. Sandcastle is different because it runs user-controlled
+  code; host-kernel/hypervisor escape and resource contention are the reasons
+  for the explicit limits and future physical separation.
