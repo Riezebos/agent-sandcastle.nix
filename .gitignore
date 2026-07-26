@@ -11,3 +11,5 @@ launcher/_build/
 launcher/deps/
 launcher/priv/*.db
 launcher/priv/*.db-*
+__pycache__/
+*.pyc

@@ -15,11 +15,18 @@ not part of the remaining implementation path.
 - ✅ `mkSandbox` and the guest base provide a useful starting point.
 - ✅ Claude Code, Codex, Node.js, Git, SSH, and common shell tools are already
   packaged in the guest closure.
-- 🟡 The current host integration is fully declarative and uses a curated
-  union store; both need adapting for runtime-created CLI sandboxes.
+- ✅ The `sandcastle` CLI, its JSON schema, state model, and the JSON-to-runner
+  builder exist and are exercised by 90 unit tests plus `nix flake check`.
+- ✅ A runtime-created sandbox builds end to end: a spec allocated by the CLI
+  produces a MicroVM runner with a per-VM store image, a VSOCK CID, a static
+  address, and the requested packages, installed through `current` and a Nix
+  GC root.
+- 🟡 The legacy declarative host integration and curated union store are still
+  present; the CLI host module does not use them.
 - 🟡 The current network module works but its hostname/IP egress allowlist will
   be replaced by public-internet egress with private/internal blocking.
-- ⬜ No CLI-managed sandbox lifecycle exists yet.
+- ⬜ No CLI-managed sandbox lifecycle exists yet: `create`, `start`, `stop`,
+  and `ssh` are still to come.
 - ⬜ No integrated fork operation exists yet.
 - ⬜ No dynamic Caddy route management exists yet.
 - ⬜ Phoenix, Happy, and their downstream deployment have not yet been removed.
@@ -45,21 +52,56 @@ later milestones, but their runtime validation remains useful.
 
 ## M1 — CLI and state model
 
-- ⬜ Add a Python standard-library `sandcastle` application.
-- ⬜ Package it as `packages.x86_64-linux.sandcastle`.
-- ⬜ Expose it as `apps.x86_64-linux.sandcastle`.
-- ⬜ Define the versioned JSON sandbox schema.
-- ⬜ Add strict validation for names, package attributes, ports, IPs, CIDs, and
+- ✅ Add a Python standard-library `sandcastle` application.
+- ✅ Package it as `packages.x86_64-linux.sandcastle`.
+- ✅ Expose it as `apps.x86_64-linux.sandcastle`.
+- ✅ Define the versioned JSON sandbox schema.
+- ✅ Add strict validation for names, package attributes, ports, IPs, CIDs, and
   hostnames.
-- ⬜ Add `/var/lib/sandcastle` state directories through the host module.
-- ⬜ Set `microvm.stateDir = "/var/lib/sandcastle/vms"`.
-- ⬜ Add global allocation and per-sandbox locks.
-- ⬜ Add atomic specification and symlink updates.
-- ⬜ Add Nix GC-root management for installed runners.
-- ⬜ Build a runner from a JSON specification.
-- ⬜ Switch runtime-created sandboxes to MicroVM's per-VM store image.
-- ⬜ Add unit tests for schema migration, allocation conflicts, path
+- ✅ Add `/var/lib/sandcastle` state directories through the host module.
+- ✅ Set `microvm.stateDir = "/var/lib/sandcastle/vms"`.
+- ✅ Add global allocation and per-sandbox locks.
+- ✅ Add atomic specification and symlink updates.
+- ✅ Add Nix GC-root management for installed runners.
+- ✅ Build a runner from a JSON specification.
+- ✅ Switch runtime-created sandboxes to MicroVM's per-VM store image.
+- ✅ Add unit tests for schema migration, allocation conflicts, path
   resolution, and failed atomic operations.
+
+M1 is complete. What exists now:
+
+- `sandcastle/` — a standard-library Python package with `errors`, `validate`,
+  `config`, `spec`, `state`, `build`, `systemd`, and `cli` modules.
+- `nix/sandcastle-package.nix` — the CLI derivation. Its `checkPhase` runs the
+  unit tests, so `nix flake check` fails if they do.
+- `nix/guest-module.nix` — the CLI-first guest: `dev` user, VSOCK SSH, static
+  address, per-VM store image, tmpfs scratch paths, no Happy.
+- `nix/sandbox-builder.nix` — `lib.runnerFromSpecFile`, which the CLI evaluates
+  against this flake's own store path so sandboxes are built from the same
+  pinned inputs as the host.
+- `nix/host-module.nix` — `services.sandcastle`, the state tree, the MicroVM
+  state root, `/etc/sandcastle/config.json`, the GC-root directory, and the
+  generic TAP-to-bridge attachment for runtime-created VMs.
+- CLI commands so far: `list`, `show`, and `build [--install]`.
+
+Verified locally: `nix flake check` passes (9 checks), and a CLI-allocated
+`cli-smoke` spec built a runner carrying its own store image, its allocated
+MAC, VSOCK CID 100, `systemd.machine_id=`, a `sc-`-prefixed TAP device, and
+`nodejs`, `pnpm`, `python3`, and `uv` in the guest system path. Booting it is
+still M2 work on Foundry.
+
+Notable design decisions made during M1:
+
+- The persisted spec holds no network topology. The CLI composes a build input
+  from the spec plus the host's gateway, prefix length, and resolvers, so
+  changing the bridge subnet is a rebuild rather than a rewrite of every spec.
+- Runner builds use `builtins.getFlake` on the flake's store path and read the
+  build input from a store path, which requires `--impure`. Nothing an
+  operator typed is ever spliced into the expression as source text.
+- Guests keep `type = "tap"` interfaces rather than QEMU's bridge helper, so
+  QEMU's own `-sandbox on` seccomp confinement stays enabled.
+- Machine identity is applied through `systemd.machine_id=` on the kernel
+  command line rather than a generated `/etc/machine-id`.
 
 ## M2 — Lifecycle and VSOCK SSH
 
@@ -164,11 +206,15 @@ later milestones, but their runtime validation remains useful.
 
 ## Immediate next steps
 
-1. Define the JSON schema and state-directory invariants.
-2. Package a minimal CLI with `list`, validation, locking, and atomic writes.
-3. Implement the JSON-to-MicroVM runner builder using per-VM store images.
-4. Implement `create`, `start`, `stop`, `status`, and VSOCK `ssh`.
-5. Deploy a `cli-smoke` sandbox alongside the current launcher.
+1. Implement `create`, including home-disk creation, credential directory
+   setup, and rollback of partial state on failure.
+2. Implement `start`, `stop`, `restart`, `status`, and `logs` on top of the
+   generic `microvm@<name>.service` units.
+3. Implement `rebuild` with candidate-build-first activation and rollback to
+   the retained `previous` GC root.
+4. Implement `sandcastle ssh` over VSOCK with per-sandbox known-hosts state.
+5. Deploy the CLI host to Foundry and boot a `cli-smoke` sandbox alongside the
+   current launcher.
 6. Add package mutation and simplified egress.
 7. Add raw-disk forking.
 8. Add Caddy route management.
@@ -199,6 +245,17 @@ be kept merely because it already exists.
   `microvm@.service` units and VSOCK SSH support.
 - The current QEMU runner opens declared `microvm.volumes` with
   `format=raw`; the first integrated fork implementation therefore stays raw.
+  The generated `cli-smoke` runner confirms this: `home.img` is opened as
+  `format=raw` relative to the VM state directory.
+- microvm.nix auto-creates and formats a declared volume on first boot, so
+  `create` creating the disk itself is about failure reporting and free-space
+  checks rather than correctness.
+- Kernel interface names cap at 15 characters, so guest TAP devices are named
+  `sc-` plus 11 hex characters of `sha256(name)`. That derivation exists in
+  `nix/guest-module.nix` and `sandcastle/state.py` and is pinned by a test.
+- Runtime-created sandboxes are not in `config.microvm.vms`, so the host
+  cannot enumerate them at build time. TAP devices are attached to the bridge
+  by a generic `ExecStartPost` that adopts any unattached `sc-` device.
 - The curated union store requires the host configuration to know all guest
   closure roots and conflicts with runtime-created CLI sandboxes.
 - A writable guest Nix store is not planned initially. Immutable package-list

@@ -23,6 +23,13 @@ Implemented so far:
 - `nixosModules.sandboxNetwork`, which creates the sandbox bridge, DHCP/DNS,
   NAT, and an IP-based nftables egress allowlist.
 - Eval/build examples for a smoke VM and dummy Claude/Codex agent sandboxes.
+- A `sandcastle` CLI (`sandcastle/`) with a versioned JSON sandbox schema,
+  strict validation, locking, atomic state updates, allocation of addresses
+  and VSOCK CIDs, Nix GC-root management, and a JSON-to-MicroVM runner
+  builder. Only `list`, `show`, and `build` are wired up so far; the lifecycle
+  commands are next.
+- `nixosModules.sandcastleHost` and `nixosModules.sandcastleGuest`, the
+  CLI-first replacement for the declarative sandbox path.
 - A Phoenix LiveView launcher scaffold in `launcher/` that stores dry-run
   sandbox records in SQLite, enforces Authentik identity/group authorization,
   records audit attribution, and renders path-free VM config functions without
@@ -36,6 +43,36 @@ nix build .#nixosConfigurations.example-host.config.system.build.toplevel
 nix build .#nixosConfigurations.example-agent-host.config.system.build.toplevel
 nix build .#checks.x86_64-linux.launcher-syntax
 ```
+
+The CLI's unit tests run inside its derivation, so `nix build .#sandcastle`
+fails if they do. To iterate without Nix:
+
+```sh
+python3 -m unittest discover --start-directory tests --top-level-directory .
+```
+
+## CLI-First Path
+
+`PLAN.md` describes the CLI-first design that supersedes the launcher, and
+`PROGRESS.md` tracks it. The host side is enabled with:
+
+```nix
+{
+  imports = [ agent-sandcastle.nixosModules.sandcastleHost ];
+  services.sandcastle.enable = true;
+}
+```
+
+That installs the `sandcastle` command, creates `/var/lib/sandcastle`, points
+`microvm.stateDir` at `/var/lib/sandcastle/vms`, and writes
+`/etc/sandcastle/config.json` so the CLI knows the bridge subnet and which
+flake to build sandboxes from. Sandbox runners are built by evaluating
+`lib.runnerFromSpecFile` against that flake, so a sandbox always uses the same
+pinned nixpkgs and `microvm.nix` as the host it runs on.
+
+Runtime-created sandboxes use `microvm.nix`'s per-VM store image rather than
+the curated union store, which is what makes them possible without the host
+configuration knowing every guest closure root in advance.
 
 The standalone smoke runner is available as:
 
