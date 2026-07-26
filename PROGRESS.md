@@ -342,6 +342,13 @@ be kept merely because it already exists.
   by a generic `ExecStartPost` that adopts any unattached `sc-` device.
 - The curated union store requires the host configuration to know all guest
   closure roots and conflicts with runtime-created CLI sandboxes.
+- NixOS deduplicates imported modules by key, and a path is its own key while a
+  bare function value is not. `nixosModules.sandboxStore` and
+  `sandboxNetwork` are therefore exported as paths: both `nixosModules.host`
+  and `nixosModules.sandcastleHost` pull them in, and exporting them as
+  `import <path>` made importing both fail with "option is already declared".
+  `checks.example-migration-host-toplevel` pins this, because enabling both at
+  once is exactly what the build-alongside migration phase does.
 - A writable guest Nix store is not planned initially. Immutable package-list
   rebuilds plus project-local `uv` and `pnpm` state are the chosen model.
 - The current egress allowlist works technically but is intentionally replaced

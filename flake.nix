@@ -154,6 +154,24 @@
         })
       ];
 
+      # The shape the downstream host takes during migration: the retired
+      # declarative path and the CLI host enabled at the same time, so the CLI
+      # can be validated before Phoenix, Happy, and the curated store are
+      # removed. Both module sets pull in `sandboxNetwork`, so this is what
+      # keeps them deduplicating.
+      exampleMigrationHost = mkNixos [
+        self.nixosModules.host
+        self.nixosModules.sandcastleHost
+        exampleHostBase
+        ({ ... }: {
+          services.agent-sandcastle.networking.enable = true;
+          services.sandcastle = {
+            enable = true;
+            routeZone = "sandboxes.example.com";
+          };
+        })
+      ];
+
       exampleLauncherHost = mkNixos [
         self.nixosModules.host
         self.nixosModules.launcher
@@ -202,8 +220,14 @@
           nixpkgs.overlays = [ agentOverlay ];
         };
 
-        sandboxStore = import ./nix/sandbox-store.nix;
-        sandboxNetwork = import ./nix/sandbox-network.nix;
+        # Exported as paths, not as `import <path>`. NixOS deduplicates
+        # imported modules by key, and a path is its own key while a bare
+        # function value is not. These two are pulled in by both `host` and
+        # `sandcastleHost`, so exporting them as functions made importing both
+        # modules fail with "option is already declared" — which is exactly
+        # what the migration's build-alongside phase has to do.
+        sandboxStore = ./nix/sandbox-store.nix;
+        sandboxNetwork = ./nix/sandbox-network.nix;
         launcher = import ./nix/launcher-module.nix { inherit self; };
 
         host = { ... }: {
@@ -225,6 +249,7 @@
         example-host = exampleHost;
         example-agent-host = exampleAgentHost;
         example-cli-host = exampleCliHost;
+        example-migration-host = exampleMigrationHost;
         example-launcher-host = exampleLauncherHost;
       };
 
@@ -272,6 +297,8 @@
         sandcastle = sandcastle;
         sandbox-example-runner = self.packages.${system}.sandbox-example-runner;
         example-cli-host-toplevel = exampleCliHost.config.system.build.toplevel;
+        # Pins that `host` and `sandcastleHost` can be imported together.
+        example-migration-host-toplevel = exampleMigrationHost.config.system.build.toplevel;
 
         sandbox-smoke-runner = self.packages.${system}.sandbox-smoke;
         example-host-toplevel = exampleHost.config.system.build.toplevel;
