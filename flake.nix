@@ -36,6 +36,40 @@
         #   nix build "path:$PWD#launcher" — copy the `got:` hash, paste here.
         fetchMixDepsHash = "sha256-Hjluglh8h1zDt1UCOARgXiasEAIDUNr7nxX94QxsZ2U=";
       };
+
+      sandcastle = pkgs.callPackage ./nix/sandcastle-package.nix { };
+
+      # Turns a validated JSON sandbox specification into a MicroVM runner.
+      # `sandcastle build` evaluates `lib.runnerFromSpecFile` against this
+      # flake's store path, so a sandbox is always built from the same pinned
+      # inputs as the host it runs on.
+      sandboxBuilder = import ./nix/sandbox-builder.nix {
+        inherit nixpkgs microvm llm-agents system;
+      };
+
+      exampleSandboxSpec = {
+        schemaVersion = 1;
+        name = "cli-example";
+        vcpu = 2;
+        memoryMiB = 2304;
+        homeDiskMiB = 16384;
+        packages = [ "nodejs" "uv" ];
+        agents = [ "claude-code" "codex" ];
+        ipv4 = "10.88.0.16";
+        mac = "02:00:aa:bb:cc:dd";
+        vsockCid = 100;
+        machineId = "0123456789abcdef0123456789abcdef";
+        network = {
+          gateway = "10.88.0.1";
+          prefixLength = 24;
+          nameservers = [ "10.88.0.1" ];
+        };
+        # The CLI substitutes the host's real control key here. A throwaway one
+        # keeps the eval-coverage runner shaped like a real one.
+        authorizedKeys = [
+          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL8sHqFV9M5DBB6r1x8Q0aLmQ9NcbW7dEXAMPLEONLY example"
+        ];
+      };
       agentOverlay = _final: _prev: {
         inherit (agentPackages) claude-code codex happy-coder;
       };
@@ -105,6 +139,21 @@
         })
       ];
 
+      exampleCliHost = mkNixos [
+        self.nixosModules.sandcastleHost
+        exampleHostBase
+        ({ ... }: {
+          services.sandcastle = {
+            enable = true;
+            routeZone = "sandboxes.example.com";
+          };
+
+          # Until M3 replaces it, the CLI host reuses the existing bridge,
+          # DNS, and NAT module for the sandbox network.
+          services.agent-sandcastle.networking.enable = true;
+        })
+      ];
+
       exampleLauncherHost = mkNixos [
         self.nixosModules.host
         self.nixosModules.launcher
@@ -122,12 +171,31 @@
       ];
     in
     {
-      lib = import ./nix/sandbox.nix {
-        inherit lib;
-      };
+      # `mkSandbox` belongs to the retired declarative path and is removed in
+      # M6; `runnerFromSpecFile` and friends are the CLI-first entry points.
+      lib =
+        (import ./nix/sandbox.nix {
+          inherit lib;
+        })
+        // sandboxBuilder;
 
       nixosModules = {
         default = self.nixosModules.host;
+
+        sandcastleGuest = ./nix/guest-module.nix;
+
+        sandcastleHost = { ... }: {
+          imports = [
+            microvm.nixosModules.host
+            (import ./nix/host-module.nix { inherit self; })
+            self.nixosModules.sandboxNetwork
+          ];
+
+          nixpkgs.overlays = [
+            microvm.overlays.default
+            agentOverlay
+          ];
+        };
 
         base = { ... }: {
           imports = [ ./nix/base-image.nix ];
@@ -156,11 +224,12 @@
         sandbox-smoke = smokeVm;
         example-host = exampleHost;
         example-agent-host = exampleAgentHost;
+        example-cli-host = exampleCliHost;
         example-launcher-host = exampleLauncherHost;
       };
 
       packages.${system} = {
-        default = self.packages.${system}.sandbox-smoke;
+        default = self.packages.${system}.sandcastle;
 
         claude-code = agentPackages.claude-code;
         codex = agentPackages.codex;
@@ -168,6 +237,12 @@
         happy-coder = agentPackages.happy-coder;
 
         launcher = launcher;
+
+        inherit sandcastle;
+
+        # A runner built the way `sandcastle build` builds one, for eval and
+        # build coverage without a running host.
+        sandbox-example-runner = sandboxBuilder.runnerFromSpec exampleSandboxSpec;
 
         sandbox-smoke = smokeVm.config.microvm.declaredRunner;
 
@@ -179,7 +254,12 @@
       };
 
       apps.${system} = {
-        default = self.apps.${system}.sandbox-smoke;
+        default = self.apps.${system}.sandcastle;
+
+        sandcastle = {
+          type = "app";
+          program = "${sandcastle}/bin/sandcastle";
+        };
 
         sandbox-smoke = {
           type = "app";
@@ -188,6 +268,11 @@
       };
 
       checks.${system} = {
+        # Builds the CLI and runs its unit tests as part of the derivation.
+        sandcastle = sandcastle;
+        sandbox-example-runner = self.packages.${system}.sandbox-example-runner;
+        example-cli-host-toplevel = exampleCliHost.config.system.build.toplevel;
+
         sandbox-smoke-runner = self.packages.${system}.sandbox-smoke;
         example-host-toplevel = exampleHost.config.system.build.toplevel;
         example-agent-host-toplevel = exampleAgentHost.config.system.build.toplevel;
