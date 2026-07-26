@@ -5,14 +5,17 @@
   python3,
   coreutils,
   nix,
+  openssh,
   systemd,
 }: let
   # Everything the CLI shells out to. Keeping it explicit means a sandcastle
   # invocation does not depend on whatever happens to be on the operator's
-  # PATH under sudo.
+  # PATH under sudo. `systemd` supplies systemctl and journalctl; `openssh`
+  # supplies the ssh and ssh-keygen that `sandcastle ssh` uses over VSOCK.
   runtimeInputs = [
     coreutils
     nix
+    openssh
     systemd
   ];
 in

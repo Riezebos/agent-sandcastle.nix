@@ -44,6 +44,11 @@ MAX_PACKAGE_ATTR_LENGTH = 80
 MAC_RE = re.compile(r"\A(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\Z")
 MACHINE_ID_RE = re.compile(r"\A[0-9a-f]{32}\Z")
 
+# systemd treats the all-zero ID as "unset" and silently falls back to the
+# SMBIOS UUID, so a sandbox carrying it would quietly lose the identity the
+# CLI allocated for it.
+NULL_MACHINE_ID = "0" * 32
+
 HOSTNAME_LABEL_RE = re.compile(r"\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 
 # 0, 1, and 2 are reserved by the VSOCK address family for the hypervisor,
@@ -164,6 +169,11 @@ def validate_machine_id(value):
     """Return a validated systemd machine ID."""
     if not isinstance(value, str) or not MACHINE_ID_RE.match(value):
         raise ValidationError("machine ID must be 32 lowercase hexadecimal characters")
+    if value == NULL_MACHINE_ID:
+        raise ValidationError(
+            "machine ID must not be all zeroes: systemd rejects the null ID and "
+            "would fall back to the hypervisor's SMBIOS UUID"
+        )
     return value
 
 
@@ -199,6 +209,11 @@ def validate_memory_mib(value):
 
 def validate_disk_mib(value):
     return _as_bounded_int(value, "homeDiskMiB", MIN_DISK_MIB, MAX_DISK_MIB)
+
+
+def validate_line_count(value):
+    """Return a validated journal line count."""
+    return _as_bounded_int(value, "line count", 1, 1000000)
 
 
 # Store paths are spliced into the Nix expression the CLI evaluates, so they

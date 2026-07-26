@@ -25,8 +25,10 @@ not part of the remaining implementation path.
   present; the CLI host module does not use them.
 - 🟡 The current network module works but its hostname/IP egress allowlist will
   be replaced by public-internet egress with private/internal blocking.
-- ⬜ No CLI-managed sandbox lifecycle exists yet: `create`, `start`, `stop`,
-  and `ssh` are still to come.
+- ✅ The CLI-managed lifecycle exists: `create`, `status`, `start`, `stop`,
+  `restart`, `rebuild`, `logs`, `ssh`, and `delete`.
+- ✅ VSOCK SSH into a guest as `dev` has been runtime-verified, including host
+  key persistence across a reboot.
 - ⬜ No integrated fork operation exists yet.
 - ⬜ No dynamic Caddy route management exists yet.
 - ⬜ Phoenix, Happy, and their downstream deployment have not yet been removed.
@@ -105,20 +107,94 @@ Notable design decisions made during M1:
 
 ## M2 — Lifecycle and VSOCK SSH
 
-- ⬜ Implement `create`.
-- ⬜ Implement `list` and `status` without reevaluating every sandbox.
-- ⬜ Implement `start`, `stop`, and `restart`.
-- ⬜ Implement `rebuild` with candidate-build-first activation.
-- ⬜ Roll back `current` after failed activation.
-- ⬜ Implement host-side and guest-side log access.
-- ⬜ Implement guarded `delete`.
-- ⬜ Allocate stable IPv4 addresses and MAC addresses.
-- ⬜ Allocate unique VSOCK CIDs and machine identities.
-- ⬜ Enable the guest's `microvm.vsock.ssh` support.
-- ⬜ Implement `sandcastle ssh <name>` as user `dev`.
-- ⬜ Keep per-sandbox SSH known-hosts state.
-- ⬜ Support opt-in SSH agent forwarding.
-- ⬜ Runtime-test the full lifecycle on Foundry with `cli-smoke`.
+- ✅ Implement `create`.
+- ✅ Implement `list` and `status` without reevaluating every sandbox.
+- ✅ Implement `start`, `stop`, and `restart`.
+- ✅ Implement `rebuild` with candidate-build-first activation.
+- ✅ Roll back `current` after failed activation.
+- ✅ Implement host-side and guest-side log access.
+- ✅ Implement guarded `delete`.
+- ✅ Allocate stable IPv4 addresses and MAC addresses.
+- ✅ Allocate unique VSOCK CIDs and machine identities.
+- ✅ Enable the guest's `microvm.vsock.ssh` support.
+- ✅ Implement `sandcastle ssh <name>` as user `dev`.
+- ✅ Keep per-sandbox SSH known-hosts state.
+- ✅ Support opt-in SSH agent forwarding.
+- ✅ Enforce the host's concurrent-VM limit before starting another sandbox.
+  (Listed under M3, but `start` is the only place it belongs.)
+- 🟡 Runtime-tested locally under WSL2 KVM; not yet exercised through the
+  `microvm@` units on Foundry.
+
+M2 is functionally complete. What exists now:
+
+- `sandcastle/lifecycle.py` — `create`, `start`, `stop`, `restart`, `rebuild`,
+  `delete`, and `status`, plus the create unwind and the rebuild rollback.
+- `sandcastle/ssh.py` — the control key, per-sandbox known-hosts state, and
+  the `ssh` argument vector for a `vsock/<cid>` destination.
+- `sandcastle/systemd.py` — batched `is-active`, `systemctl show`, the
+  activation readiness check, and the `journalctl` argument vector.
+- CLI commands: `list`, `show`, `status`, `create`, `start`, `stop`,
+  `restart`, `rebuild`, `build`, `logs`, `ssh`, `delete`.
+
+Verified: `nix flake check` passes and the CLI unit suite is 185 tests.
+
+### Runtime validation performed locally
+
+WSL2 turned out to have `/dev/kvm`, `/dev/vhost-vsock`, and systemd as PID 1,
+so the guest side was verified by booting a real runner rather than by
+inspection. A probe sandbox built through `lib.runnerFromSpecFile` from a real
+`build_input` document was booted directly, with only the TAP `-netdev`
+arguments removed because no host bridge exists there. Confirmed:
+
+- `sshd-vsock.socket` is active in the guest;
+- `ssh vsock/<cid>` logs in as `dev` using only the control key;
+- the guest host key lands on `identity.img` at `/var/lib/sandcastle/ssh`;
+- after a full guest restart the pinned host key still matches, so
+  `known-hosts` state does not have to be re-accepted;
+- `journalctl` works for `dev`, which is what `logs --guest` needs;
+- microvm.nix does create and format both `home.img` and `identity.img` on
+  first boot.
+
+Two real bugs were found this way rather than by reading code:
+
+1. `microvm.vsock.ssh.enable` alone did **not** give the guest a VSOCK SSH
+   listener. `systemd-ssh-generator` only writes `sshd-vsock.socket` when
+   `/dev/vsock` already exists, and generators run before udev can autoload
+   the virtio transport from the device's modalias, so the guest silently came
+   up listening only on the AF_UNIX local socket. Fixed by loading
+   `vmw_vsock_virtio_transport` from the initrd.
+2. `systemd.machine_id=` on the kernel command line is silently ignored for
+   the all-zero ID, and systemd then falls back to the hypervisor's SMBIOS
+   UUID. `validate_machine_id` now rejects the null ID so an allocated
+   identity cannot be lost that way.
+
+### Still to do on Foundry
+
+- Deploy the CLI host and run `create`/`start`/`ssh`/`rebuild`/`delete`
+  through the real `microvm@<name>.service` units.
+- Confirm the generic TAP-to-bridge `ExecStartPost` attaches a runtime
+  sandbox's `sc-` device.
+- Confirm the `microvm` user can write `booted` in the VM directory. The
+  directory is now explicitly chmodded to 0775 rather than left to root's
+  umask, which would have made `microvm-set-booted@` fail.
+
+Notable design decisions made during M2:
+
+- Guest SSH host keys live on a separate small `identity.img` volume rather
+  than on `home.img` or in the read-only system closure. That is what makes
+  host-key pinning survive a reboot while still letting a fork copy the home
+  disk without inheriting the parent's identity.
+- The public control key is a build input, like the network parameters, not a
+  spec field. Rotating it is a rebuild rather than a rewrite of every spec.
+- Activation success is measured, not assumed. `microvm@.service` is
+  `Type=simple` with `Restart=always` under QEMU, so `systemctl start`
+  returns successfully for a guest that cannot boot; without the readiness
+  check the rollback requirement would never have fired.
+- `rebuild` does not stop the guest before moving `current`. microvm.nix's
+  `booted` symlink still points at the old runner, so the unit's `ExecStop`
+  keeps shutting the running guest down with the runner it was started from.
+- Everything after `--` on the command line goes to the tool sandcastle execs,
+  because argparse consumes the marker itself.
 
 ## M3 — Packages, egress, and shared-host limits
 
@@ -134,7 +210,9 @@ Notable design decisions made during M1:
 - ⬜ Retain denies for host, sandbox peers, LAN, private, link-local, metadata,
   multicast, and other non-public destinations.
 - ⬜ Add aggregate Sandcastle systemd slice limits.
-- ⬜ Add disk-space and concurrent-VM checks.
+- ✅ Add disk-space and concurrent-VM checks. (Landed with M2: `create`
+  refuses when the declared disks plus headroom would not fit, and `start`
+  refuses past `maxRunning`.)
 
 ## M4 — Reliable filesystem forks
 
@@ -144,9 +222,11 @@ Notable design decisions made during M1:
   sandbox volumes as raw disks, so it does not satisfy the new fork milestone.
 - ⬜ Implement parent/child locking.
 - ⬜ Stop and cleanly quiesce the parent.
-- ⬜ Sparse-copy the raw home disk with `qemu-img convert`.
+- ⬜ Sparse-copy the raw home disk with `qemu-img convert`, and only that disk:
+  leaving `identity.img` uncopied is what gives the child a fresh guest SSH
+  host identity, with nothing to generate or scrub.
 - ⬜ Clone the non-secret package and resource specification.
-- ⬜ Allocate new IP, MAC, VSOCK, machine, and SSH identities.
+- ⬜ Allocate new IP, MAC, VSOCK, and machine identities.
 - ⬜ Create an empty credential directory for the child.
 - ⬜ Ensure routes are not inherited.
 - ⬜ Restore the parent's prior running state.
@@ -206,19 +286,15 @@ Notable design decisions made during M1:
 
 ## Immediate next steps
 
-1. Implement `create`, including home-disk creation, credential directory
-   setup, and rollback of partial state on failure.
-2. Implement `start`, `stop`, `restart`, `status`, and `logs` on top of the
-   generic `microvm@<name>.service` units.
-3. Implement `rebuild` with candidate-build-first activation and rollback to
-   the retained `previous` GC root.
-4. Implement `sandcastle ssh` over VSOCK with per-sandbox known-hosts state.
-5. Deploy the CLI host to Foundry and boot a `cli-smoke` sandbox alongside the
-   current launcher.
-6. Add package mutation and simplified egress.
-7. Add raw-disk forking.
-8. Add Caddy route management.
-9. Remove Phoenix, Happy, the launcher secret, and the curated-store path only
+1. Deploy the CLI host to Foundry and run the full lifecycle through the real
+   `microvm@<name>.service` units, alongside the current launcher.
+2. Add package mutation (`packages list/add/remove`) and simplified egress.
+3. Add aggregate systemd slice limits.
+4. Add raw-disk forking.
+5. Add Caddy route management. `delete` already refuses to remove a sandbox
+   whose Caddy snippet carries a `# sandcastle-sandbox: <name>` marker, so M5
+   must emit that marker.
+6. Remove Phoenix, Happy, the launcher secret, and the curated-store path only
    after the replacement passes the acceptance checklist.
 
 ## Historical work now scheduled for removal
@@ -239,17 +315,25 @@ be kept merely because it already exists.
 
 ## Known implementation facts
 
-- Local development on macOS has no `/dev/kvm`; Foundry remains the runtime
-  validation host.
+- The WSL2 development machine does have `/dev/kvm`, `/dev/vhost-vsock`, and
+  systemd as PID 1, so a runner can be booted and SSHed into locally. It has
+  no sandbox bridge, so TAP networking, DNS, NAT, and egress still have to be
+  validated on Foundry.
 - The currently locked `microvm.nix` host module already provides generic
-  `microvm@.service` units and VSOCK SSH support.
+  `microvm@.service` units and VSOCK SSH support, but `microvm.vsock.ssh` on
+  its own is not sufficient: see the initrd module note in M2.
+- Only cloud-hypervisor sets `supportsNotifySocket`, so QEMU sandboxes are
+  `Type=simple` and their start cannot report a guest that fails to boot.
+- `microvm-set-booted@.service` runs as the unprivileged `microvm` user in the
+  VM directory, so that directory must stay group-writable by `kvm`.
 - The current QEMU runner opens declared `microvm.volumes` with
   `format=raw`; the first integrated fork implementation therefore stays raw.
   The generated `cli-smoke` runner confirms this: `home.img` is opened as
   `format=raw` relative to the VM state directory.
-- microvm.nix auto-creates and formats a declared volume on first boot, so
-  `create` creating the disk itself is about failure reporting and free-space
-  checks rather than correctness.
+- microvm.nix auto-creates and formats a declared volume on first boot, but
+  only when the image file does not already exist. `create` therefore does the
+  free-space check and leaves image creation to the runner rather than
+  pre-creating a file the runner would then refuse to format.
 - Kernel interface names cap at 15 characters, so guest TAP devices are named
   `sc-` plus 11 hex characters of `sha256(name)`. That derivation exists in
   `nix/guest-module.nix` and `sandcastle/state.py` and is pinned by a test.
@@ -263,4 +347,5 @@ be kept merely because it already exists.
 - The current egress allowlist works technically but is intentionally replaced
   because hostname-to-IP rules are too brittle for general development.
 - Credentials and Caddy routes are separate state and are never inherited by
-  forks.
+  forks. The guest's SSH host key is a third such piece of state: it lives on
+  `identity.img`, which a fork must recreate rather than copy.

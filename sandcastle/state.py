@@ -12,6 +12,7 @@ import fcntl
 import hashlib
 import ipaddress
 import os
+import shutil
 import tempfile
 
 from . import spec as spec_module
@@ -20,6 +21,11 @@ from .errors import ConflictError, ExhaustedError, NotFoundError, StateError
 
 DIRECTORY_MODE = 0o700
 SPEC_MODE = 0o600
+
+# `microvm@<name>.service` and `microvm-set-booted@<name>.service` run as the
+# unprivileged microvm user with this directory as their working directory, and
+# set-booted writes the `booted` symlink into it, so it cannot be root-only.
+VM_DIRECTORY_MODE = 0o775
 
 GLOBAL_LOCK = "global"
 
@@ -39,6 +45,7 @@ def ensure_directories(config):
         config.locks_dir,
         config.known_hosts_dir,
         config.caddy_dir,
+        config.ssh_dir,
     ):
         os.makedirs(path, mode=DIRECTORY_MODE, exist_ok=True)
 
@@ -270,6 +277,102 @@ def booted_runner(config, name):
     try:
         return os.readlink(os.path.join(config.vm_dir(validate.validate_name(name)), "booted"))
     except (FileNotFoundError, OSError):
+        return None
+
+
+def ensure_vm_dir(config, name):
+    """Create a sandbox's VM directory and give it to the microvm user."""
+    name = validate.validate_name(name)
+    path = config.vm_dir(name)
+    os.makedirs(path, exist_ok=True)
+    # makedirs applies the caller's umask, and root's usual 022 would drop the
+    # group write bit the set-booted unit needs.
+    os.chmod(path, VM_DIRECTORY_MODE)
+    chown_vm_path(config, path)
+    return path
+
+
+def remove_vm_dir(config, name):
+    """Delete a sandbox's VM directory, disks and all."""
+    return _remove_subdirectory(config.vms_dir, config.vm_dir(validate.validate_name(name)))
+
+
+def remove_credentials(config, name, only_if_empty=False):
+    """Delete a sandbox's credential directory.
+
+    `only_if_empty` is what a failed `create` uses: reusing the name of a
+    sandbox whose credentials a previous `delete` deliberately kept must not
+    turn an unwind into silent data loss.
+    """
+    path = config.credentials_path(validate.validate_name(name))
+    return _remove_subdirectory(config.credentials_dir, path, only_if_empty=only_if_empty)
+
+
+def _remove_subdirectory(parent, path, only_if_empty=False):
+    """Recursively delete `path`, which must be a real directory in `parent`.
+
+    The path is always rebuilt from a validated name, and it is refused unless
+    it really is a directory directly inside `parent`, so neither a tampered
+    name nor a symlink planted in the state tree can turn a delete of sandbox
+    state into a delete of something else.
+    """
+    if not os.path.exists(path):
+        return False
+    resolved = os.path.realpath(path)
+    if os.path.dirname(resolved) != os.path.realpath(parent):
+        raise StateError(f"{path} resolves to {resolved}, outside {parent}")
+    if os.path.islink(path) or not os.path.isdir(path):
+        raise StateError(f"{path} is not a directory")
+    if only_if_empty and os.listdir(path):
+        return False
+    shutil.rmtree(path)
+    _fsync_directory(parent)
+    return True
+
+
+def chown_vm_path(config, path, follow_symlinks=True):
+    """Give a state path to the microvm user, ignoring a non-root caller."""
+    uid = _lookup_uid(config.vm_user)
+    gid = _lookup_gid(config.vm_group)
+    if uid is None or gid is None:
+        return
+    try:
+        os.chown(path, uid, gid, follow_symlinks=follow_symlinks)
+    except (PermissionError, OSError):
+        # Unit tests and dry runs operate on a state tree the caller owns.
+        pass
+
+
+def free_space_mib(path):
+    """Return the free space in MiB on the filesystem holding `path`.
+
+    Walks up to the nearest existing ancestor so this works before a
+    sandbox's own directory has been created.
+    """
+    while not os.path.exists(path):
+        parent = os.path.dirname(path)
+        if parent == path:
+            raise StateError(f"no existing ancestor of {path} to measure free space on")
+        path = parent
+    stats = os.statvfs(path)
+    return (stats.f_bavail * stats.f_frsize) // (1024 * 1024)
+
+
+def _lookup_uid(user):
+    try:
+        import pwd
+
+        return pwd.getpwnam(user).pw_uid
+    except (ImportError, KeyError):
+        return None
+
+
+def _lookup_gid(group):
+    try:
+        import grp
+
+        return grp.getgrnam(group).gr_gid
+    except (ImportError, KeyError):
         return None
 
 

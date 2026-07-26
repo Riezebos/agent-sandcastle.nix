@@ -46,3 +46,9 @@ class StateError(SandcastleError):
     """On-disk state is missing, unreadable, or internally inconsistent."""
 
     exit_code = 7
+
+
+class LifecycleError(SandcastleError):
+    """A systemd start, stop, restart, or log operation failed."""
+
+    exit_code = 8

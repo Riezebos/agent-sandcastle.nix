@@ -127,6 +127,30 @@ class StorePathTests(unittest.TestCase):
                 validate.validate_store_path(path)
 
 
+class MachineIdTests(unittest.TestCase):
+    def test_accepts_a_hex_identity(self):
+        self.assertEqual(validate.validate_machine_id("9f2c" * 8), "9f2c" * 8)
+
+    def test_rejects_the_null_id_systemd_would_silently_replace(self):
+        # Booting with systemd.machine_id=000... makes systemd fall back to the
+        # hypervisor's SMBIOS UUID, so the sandbox loses its allocated identity.
+        with self.assertRaises(ValidationError):
+            validate.validate_machine_id(validate.NULL_MACHINE_ID)
+
+    def test_rejects_the_wrong_shape(self):
+        for value in ("", "0123456789ABCDEF0123456789abcdef", "9f2c", None, "g" * 32):
+            with self.assertRaises(ValidationError, msg=repr(value)):
+                validate.validate_machine_id(value)
+
+
+class LineCountTests(unittest.TestCase):
+    def test_line_counts_must_be_positive_integers(self):
+        self.assertEqual(validate.validate_line_count("200"), 200)
+        for value in (0, -1, "all", "; rm -rf /"):
+            with self.assertRaises(ValidationError, msg=repr(value)):
+                validate.validate_line_count(value)
+
+
 class BoundsTests(unittest.TestCase):
     def test_resource_bounds(self):
         self.assertEqual(validate.validate_vcpu(4), 4)

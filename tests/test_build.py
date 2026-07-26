@@ -7,8 +7,11 @@ from unittest import mock
 from sandcastle import build
 from sandcastle import config as config_module
 from sandcastle import spec as spec_module
+from sandcastle import ssh as ssh_module
 from sandcastle import state
 from sandcastle.errors import BuildError, StateError
+
+CONTROL_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAtest sandcastle-control"
 
 SPEC_STORE_PATH = "/nix/store/00000000000000000000000000000000-sandbox-spec.json"
 RUNNER_PATH = "/nix/store/11111111111111111111111111111111-microvm-run"
@@ -21,16 +24,36 @@ def make_spec(name="my-app", **overrides):
         "ipv4": "10.88.0.16",
         "mac": "02:00:aa:bb:cc:dd",
         "vsock_cid": 100,
-        "machine_id": "0" * 32,
+        "machine_id": "9f2c" * 8,
     }
     values.update(overrides)
     return spec_module.Spec(**values)
 
 
-class BuildInputTests(unittest.TestCase):
+class TemporaryStateTestCase(unittest.TestCase):
+    """Base case with a throwaway state tree and a stubbed control key."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="sandcastle-test-")
+        self.addCleanup(directory.cleanup)
+        self.root = directory.name
+        self.config = dataclasses.replace(
+            config_module.Config(),
+            state_dir=os.path.join(self.root, "state"),
+            gc_root_dir=os.path.join(self.root, "gcroots"),
+        )
+        state.ensure_directories(self.config)
+
+        # Nothing here should shell out to ssh-keygen.
+        patcher = mock.patch.object(ssh_module, "ensure_control_key", return_value=CONTROL_KEY)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class BuildInputTests(TemporaryStateTestCase):
     def test_network_parameters_come_from_the_host_config_not_the_spec(self):
-        resolved = config_module.Config(
-            subnet="10.88.0.0/24", host_address="10.88.0.1", nameservers=["10.88.0.1"]
+        resolved = dataclasses.replace(
+            self.config, subnet="10.88.0.0/24", host_address="10.88.0.1", nameservers=["10.88.0.1"]
         )
         document = build.build_input(resolved, make_spec())
 
@@ -42,18 +65,27 @@ class BuildInputTests(unittest.TestCase):
         self.assertEqual(document["name"], "my-app")
 
     def test_prefix_length_follows_the_configured_subnet(self):
-        resolved = config_module.Config(subnet="10.88.0.0/22", host_address="10.88.0.1")
+        resolved = dataclasses.replace(
+            self.config, subnet="10.88.0.0/22", host_address="10.88.0.1"
+        )
         self.assertEqual(build.build_input(resolved, make_spec())["network"]["prefixLength"], 22)
 
+    def test_the_control_key_is_a_build_input_not_a_spec_field(self):
+        document = build.build_input(self.config, make_spec())
 
-class BuildRunnerTests(unittest.TestCase):
+        self.assertEqual(document["authorizedKeys"], [CONTROL_KEY])
+        self.assertNotIn("authorizedKeys", make_spec().to_dict())
+
+
+class BuildRunnerTests(TemporaryStateTestCase):
     def setUp(self):
-        self.config = config_module.Config(flake_ref="/nix/store/aaa-source")
+        super().setUp()
+        self.config = dataclasses.replace(self.config, flake_ref="/nix/store/aaa-source")
 
     def test_a_missing_flake_reference_is_refused_before_any_subprocess(self):
         with mock.patch("sandcastle.build._run") as run:
             with self.assertRaises(StateError):
-                build.build_runner(config_module.Config(flake_ref=""), make_spec())
+                build.build_runner(dataclasses.replace(self.config, flake_ref=""), make_spec())
         run.assert_not_called()
 
     def test_the_expression_only_references_store_paths(self):
@@ -95,16 +127,13 @@ class BuildRunnerTests(unittest.TestCase):
         self.assertEqual(build._escape_nix_string("a\\b"), "a\\\\b")
 
 
-class InstallRunnerTests(unittest.TestCase):
-    def setUp(self):
-        directory = tempfile.TemporaryDirectory(prefix="sandcastle-test-")
-        self.addCleanup(directory.cleanup)
-        self.config = dataclasses.replace(
-            config_module.Config(),
-            state_dir=os.path.join(directory.name, "state"),
-            gc_root_dir=os.path.join(directory.name, "gcroots"),
-        )
-        state.ensure_directories(self.config)
+class InstallRunnerTests(TemporaryStateTestCase):
+    def test_the_vm_directory_stays_writable_by_the_microvm_user(self):
+        # microvm-set-booted@.service runs unprivileged in this directory and
+        # writes the `booted` symlink there, so root's umask must not win.
+        build.install_runner(self.config, "my-app", RUNNER_PATH)
+        mode = os.stat(self.config.vm_dir("my-app")).st_mode & 0o777
+        self.assertEqual(mode, state.VM_DIRECTORY_MODE)
 
     def test_installing_points_current_and_the_gc_root_at_the_runner(self):
         previous = build.install_runner(self.config, "my-app", RUNNER_PATH)

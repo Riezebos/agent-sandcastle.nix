@@ -13,6 +13,12 @@
   tapPrefix = "sc-";
   tapName = name: "${tapPrefix}${builtins.substring 0 11 (builtins.hashString "sha256" name)}";
 
+  # A small persistent volume for the guest's own identity, kept apart from
+  # /home/dev so a fork copies project state without inheriting the parent's
+  # SSH host key. `sandcastle ssh` pins whatever key it first sees here.
+  identityDir = "/var/lib/sandcastle";
+  hostKeyPath = "${identityDir}/ssh/ssh_host_ed25519_key";
+
   baseTools = with pkgs; [
     bashInteractive
     bind.dnsutils
@@ -74,6 +80,17 @@ in {
         Size of the persistent raw /home/dev volume in MiB. The image lives
         at `<stateDir>/<name>/home.img` and is the only sandbox state a fork
         copies.
+      '';
+    };
+
+    identityDiskMiB = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 32;
+      description = ''
+        Size in MiB of the persistent `identity.img` volume mounted at
+        ${identityDir}. It holds only the guest's SSH host key, which has to
+        survive a reboot for host-key pinning to mean anything, and has to
+        stay off the home volume so a fork does not inherit it.
       '';
     };
 
@@ -144,8 +161,10 @@ in {
       type = lib.types.listOf lib.types.str;
       default = [];
       description = ''
-        Extra keys accepted for the `dev` user. Host-to-guest SSH runs over
-        VSOCK and does not need one, so this is normally empty.
+        Public keys accepted for the `dev` user. `sandcastle ssh` supplies the
+        installation's control key here, which is why it is a build input
+        rather than part of the persisted sandbox specification: rotating it
+        is a rebuild.
       '';
     };
   };
@@ -156,6 +175,13 @@ in {
     networking.hostName = lib.mkDefault cfg.name;
 
     boot.kernelParams = ["systemd.machine_id=${cfg.machineId}"];
+
+    # systemd-ssh-generator only writes sshd-vsock.socket when /dev/vsock
+    # already exists, and generators run before udev can autoload the virtio
+    # transport from the device's modalias. Loading it from the initrd is what
+    # makes `sandcastle ssh` work: without this the guest boots fine and only
+    # ever listens on the AF_UNIX local socket.
+    boot.initrd.kernelModules = ["vmw_vsock_virtio_transport"];
 
     microvm = {
       guest.enable = lib.mkDefault true;
@@ -177,6 +203,13 @@ in {
           size = cfg.homeDiskMiB;
           fsType = "ext4";
           label = "sc-home";
+        }
+        {
+          image = "identity.img";
+          mountPoint = identityDir;
+          size = cfg.identityDiskMiB;
+          fsType = "ext4";
+          label = "sc-identity";
         }
       ];
 
@@ -262,7 +295,22 @@ in {
         KbdInteractiveAuthentication = false;
         PermitRootLogin = "no";
       };
+
+      # One key, on the persistent identity volume rather than on the tmpfs
+      # root, so the guest keeps the same host identity across reboots and
+      # rebuilds and `sandcastle ssh` can pin it.
+      hostKeys = [
+        {
+          type = "ed25519";
+          path = hostKeyPath;
+        }
+      ];
     };
+
+    # sshd-keygen writes the host key, so it has to run after the volume that
+    # holds it is mounted. Everything that needs the key already orders itself
+    # after sshd-keygen.
+    systemd.services.sshd-keygen.unitConfig.RequiresMountsFor = [identityDir];
 
     services.getty.autologinUser = lib.mkDefault "dev";
 
@@ -281,6 +329,9 @@ in {
           home = "/home/dev";
           createHome = true;
           group = "users";
+          # So `sandcastle logs --guest` can read the guest's own journal
+          # without giving the sandbox user any privilege over the system.
+          extraGroups = ["systemd-journal"];
           openssh.authorizedKeys.keys = cfg.authorizedKeys;
         };
       };

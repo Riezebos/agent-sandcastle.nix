@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import tempfile
 
-from . import state, validate
+from . import ssh, state, validate
 from .errors import BuildError, StateError
 
 NIX_EXPERIMENTAL_FEATURES = "nix-command flakes"
@@ -30,9 +30,10 @@ def nix_store_binary():
 def build_input(config, spec):
     """Return the document the Nix builder evaluates for `spec`.
 
-    It is the specification plus the host network parameters the guest needs
-    at build time. Those stay out of the persisted spec so changing the
-    bridge subnet is a rebuild rather than a rewrite of every spec.
+    It is the specification plus the host parameters the guest needs at build
+    time: the bridge topology and the public control key. Both stay out of the
+    persisted spec so moving the subnet or rotating the control key is a
+    rebuild rather than a rewrite of every spec.
     """
     document = spec.to_dict()
     document["network"] = {
@@ -40,6 +41,7 @@ def build_input(config, spec):
         "prefixLength": ipaddress.IPv4Network(config.subnet, strict=True).prefixlen,
         "nameservers": list(config.nameservers),
     }
+    document["authorizedKeys"] = [ssh.ensure_control_key(config)]
     return document
 
 
@@ -104,9 +106,7 @@ def install_runner(config, name, runner_path):
     name = validate.validate_name(name)
     runner_path = validate.validate_store_path(runner_path)
 
-    vm_dir = config.vm_dir(name)
-    os.makedirs(vm_dir, mode=0o775, exist_ok=True)
-    _chown_vm_path(config, vm_dir)
+    vm_dir = state.ensure_vm_dir(config, name)
 
     previous = state.installed_runner(config, name)
     if previous is not None and previous != runner_path:
@@ -115,7 +115,7 @@ def install_runner(config, name, runner_path):
     state.install_gc_root(config, name, "current", runner_path)
     current = os.path.join(vm_dir, "current")
     state.atomic_symlink(current, runner_path)
-    _chown_vm_path(config, current, follow_symlinks=False)
+    state.chown_vm_path(config, current, follow_symlinks=False)
     return previous
 
 
@@ -126,37 +126,6 @@ def rollback_runner(config, name):
         return None
     install_runner(config, name, previous)
     return previous
-
-
-def _chown_vm_path(config, path, follow_symlinks=True):
-    """Give a state path to the microvm user, ignoring a non-root caller."""
-    uid = _lookup_uid(config.vm_user)
-    gid = _lookup_gid(config.vm_group)
-    if uid is None or gid is None:
-        return
-    try:
-        os.chown(path, uid, gid, follow_symlinks=follow_symlinks)
-    except PermissionError:
-        # Unit tests and dry runs operate on a state tree the caller owns.
-        pass
-
-
-def _lookup_uid(user):
-    try:
-        import pwd
-
-        return pwd.getpwnam(user).pw_uid
-    except (ImportError, KeyError):
-        return None
-
-
-def _lookup_gid(group):
-    try:
-        import grp
-
-        return grp.getgrnam(group).gr_gid
-    except (ImportError, KeyError):
-        return None
 
 
 def _escape_nix_string(value):

@@ -81,6 +81,10 @@
             packageAttrs = spec.packages or [];
             extraPackages = map (resolvePackage pkgs) (spec.packages or []);
             agentPackages = map (resolveAgent pkgs) (spec.agents or []);
+
+            # The public half of the host's SSH control key. Absent only when
+            # a runner is built for evaluation coverage rather than for use.
+            authorizedKeys = spec.authorizedKeys or [];
           };
         })
       ];

@@ -167,6 +167,7 @@ All mutable state belongs beneath one root-owned tree:
       current -> /nix/store/...-microvm-run
       booted -> /nix/store/...-microvm-run
       home.img
+      identity.img
   credentials/
     my-app/
       codex/
@@ -175,7 +176,17 @@ All mutable state belongs beneath one root-owned tree:
     my-app.simonito.com.caddy
   locks/
   known-hosts/
+  ssh/
+    control_ed25519
 ```
+
+`identity.img` is a small persistent volume holding only the guest's own SSH
+host key. It is separate from `home.img` because a fork copies project state
+but must not inherit the parent's guest identity, and because the host key has
+to survive a reboot for host-key pinning to mean anything.
+
+`ssh/control_ed25519` is one key pair per installation, not per sandbox. Its
+private half is the only thing that can log into a sandbox as `dev`.
 
 The JSON specification records only non-secret desired state:
 
@@ -193,6 +204,12 @@ The JSON specification records only non-secret desired state:
 Routes are separate from the sandbox specification so forks never inherit
 public exposure. Credentials are also separate so forks never inherit agent
 or Git credentials.
+
+Some values the guest needs at build time are deliberately *not* spec fields.
+The bridge gateway, prefix length, and resolvers, and the public half of the
+control key, are composed into the build input from the host configuration
+instead. Moving the subnet or rotating the control key is therefore a rebuild
+of every sandbox rather than a rewrite of every specification.
 
 Each mutation uses a global allocation lock plus a per-sandbox lock. Files are
 written to a sibling temporary path and atomically renamed into place.
@@ -249,31 +266,53 @@ The CLI builds on the conventions already provided by `microvm.nix`:
 
 1. Validates and reserves the name, IP, MAC, VSOCK CID, and machine identity.
 2. Writes a proposed specification.
-3. Builds the runner.
-4. Creates and formats the raw `/home/dev` volume.
-5. Creates an empty credentials directory.
+3. Checks that the declared disks plus headroom will fit.
+4. Creates an empty credentials directory.
+5. Builds the runner.
 6. Installs the runner and GC root atomically.
 7. Leaves the VM stopped unless `--start` is provided.
 
-Failure before installation removes only temporary state. A failed create
-must not leave a partially addressable VM.
+`create` does not create the disk images. microvm.nix's runner creates and
+formats a declared volume on first boot, but only when the image file does not
+already exist, so pre-creating one would leave an unformatted disk the runner
+then refuses to format. Free space is therefore checked rather than claimed.
+
+Failure after the name is reserved releases everything the create reserved: the
+specification, the VM directory, the GC roots, the known-hosts entry, and the
+credentials directory *unless it already existed*, because a previous `delete`
+may have deliberately kept it. A failed create must not leave a partially
+addressable VM, and must not destroy credentials it did not create.
 
 ### Rebuild
 
 `rebuild`:
 
 1. Builds a candidate runner without changing the installed runner.
-2. Stops the VM if a restart is required.
-3. Replaces `current` atomically.
-4. Starts the new runner.
-5. Restores the old runner and attempts to restart it if activation fails.
+2. Replaces `current` atomically.
+3. Restarts the guest if it was running, or if `--restart` is given.
+4. Confirms the guest actually came up.
+5. Restores the old runner and restarts it if activation fails.
+
+The VM is not stopped before `current` moves. microvm.nix's `booted` symlink
+still points at the runner the guest was started from, so the unit's
+`ExecStop` shuts it down correctly across the change, and there is no window
+where the sandbox is down on an untested runner.
+
+Step 4 is not optional bookkeeping. Only cloud-hypervisor reports readiness
+over a notify socket, so a QEMU sandbox's `microvm@<name>.service` is
+`Type=simple` with `Restart=always`: `systemctl start` succeeds for a guest
+that cannot boot, and the failure hides inside a restart loop. Activation is
+therefore confirmed by watching the unit hold a single invocation in a running
+state for a few seconds. Without that check the rollback in step 5 would never
+fire.
 
 ### Delete
 
 `delete`:
 
 - refuses to delete a running VM;
-- removes Caddy routes first;
+- refuses while the sandbox still owns Caddy routes, so a route can never be
+  left pointing at an address the next `create` hands to a different sandbox;
 - requires `--yes`;
 - keeps credentials unless `--delete-credentials` is explicit;
 - removes only the resolved sandbox state directory and GC root;
@@ -288,13 +327,44 @@ support. The wrapper connects as `dev`:
 sudo sandcastle ssh my-app
 ```
 
-No guest SSH port is forwarded or opened publicly. The CLI owns a dedicated
-known-hosts file per sandbox.
+No guest SSH port is forwarded or opened publicly. The destination is
+`vsock/<cid>`, which `systemd-ssh-proxy` turns into an AF_VSOCK connection.
 
-Each sandbox has a distinct machine identity and SSH host identity. Forks
-receive new identities even though the home filesystem is copied. Agent
-forwarding is opt-in and is the initial solution for cloning private Git
-repositories without storing deploy keys in the guest.
+`microvm.vsock.ssh.enable` is necessary but not sufficient. The guest's
+`sshd-vsock.socket` is written by `systemd-ssh-generator`, which only emits it
+when `/dev/vsock` already exists; generators run before udev can autoload the
+virtio transport from the device's modalias. The guest must therefore load
+`vmw_vsock_virtio_transport` from its initrd. Without that it boots perfectly
+and listens only on the AF_UNIX local socket, so this fails as a working VM
+rather than as a build error.
+
+### Two kinds of key material
+
+These are deliberately different and must not be conflated:
+
+- one **control key** per installation, in `<stateDir>/ssh/`. Created on first
+  use; its public half is a build input, so every guest closure accepts it for
+  the `dev` user. Rotating it is a rebuild of every sandbox. It is the
+  operator's key, not sandbox state, so a fork does inherit it.
+- each guest's **own host key**, generated inside the guest onto its
+  `identity.img` volume. The CLI pins it in a per-sandbox known-hosts file on
+  first connect and checks it strictly afterwards. This is sandbox state, so a
+  fork must not inherit it.
+
+Command-line `-o` settings carry the known-hosts path and strictness, because
+the `Host vsock/*` block in `/etc/ssh/ssh_config` deliberately disables
+host-key checking for ephemeral VSOCK addresses and ssh honours the first value
+it sees.
+
+Each sandbox has a distinct machine identity and SSH host identity. Note that
+`systemd.machine_id=` on the kernel command line is ignored for the all-zero
+ID, and systemd then falls back to the hypervisor's SMBIOS UUID, so the
+allocated identity must be validated as non-null.
+
+Agent forwarding is opt-in and is the initial solution for cloning private Git
+repositories without storing deploy keys in the guest. Without it the
+operator's agent is kept out of the guest entirely rather than merely unused
+for authentication.
 
 ## 9. Networking
 
@@ -331,11 +401,16 @@ backing chains.
 3. Stops the parent and waits for a clean shutdown.
 4. Copies the raw home disk with `qemu-img convert` using sparse output.
 5. Copies the non-secret package and resource specification.
-6. Allocates a new IP, MAC, VSOCK CID, machine identity, and SSH identity.
+6. Allocates a new IP, MAC, VSOCK CID, and machine identity.
 7. Creates an empty child credentials directory.
 8. Builds and installs the child runner.
 9. Restarts the parent if it was previously running.
 10. Leaves the child stopped unless `--start` is provided.
+
+Only `home.img` is copied. The child gets a fresh guest SSH host identity for
+free: `identity.img` is simply not copied, and the child generates its own key
+on first boot. No key needs to be generated, injected, or scrubbed out of the
+copied filesystem.
 
 The child inherits source files, uncommitted changes, virtual environments,
 Node dependencies, and other home-directory state. It does not inherit:
@@ -344,6 +419,7 @@ Node dependencies, and other home-directory state. It does not inherit:
 - Git credentials;
 - Caddy routes;
 - network or machine identity;
+- the guest SSH host key;
 - process or memory state.
 
 This is O(used disk data), not O(1), but has no backing-chain bookkeeping and
@@ -436,8 +512,14 @@ agent-sandcastle.nix/
   sandcastle/
     __main__.py
     cli.py
+    config.py
+    errors.py
+    validate.py
+    spec.py
     state.py
     build.py
+    systemd.py
+    ssh.py
     lifecycle.py
     routes.py
   tests/

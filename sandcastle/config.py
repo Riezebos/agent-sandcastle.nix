@@ -39,6 +39,12 @@ class Config:
     vm_group: str = "kvm"
     nameservers: list = field(default_factory=lambda: ["10.88.0.1"])
 
+    # `systemd-ssh-proxy`, which turns an `ssh vsock/<cid>` destination into an
+    # AF_VSOCK connection. The host module fills this in from its own systemd
+    # package; when it is empty the CLI relies on the `Host vsock/*` block that
+    # `programs.ssh.systemd-ssh-proxy` adds to /etc/ssh/ssh_config.
+    ssh_proxy: str = ""
+
     # Directories derived from `state_dir`. Kept as properties rather than
     # fields so a relocated state tree can never leave one of them behind.
     @property
@@ -66,8 +72,20 @@ class Config:
         return os.path.join(self.state_dir, "known-hosts")
 
     @property
+    def ssh_dir(self):
+        return os.path.join(self.state_dir, "ssh")
+
+    @property
+    def control_key_path(self):
+        """Private half of the key every guest accepts for the `dev` user."""
+        return os.path.join(self.ssh_dir, "control_ed25519")
+
+    @property
     def network(self):
         return ipaddress.IPv4Network(self.subnet, strict=True)
+
+    def known_hosts_path(self, name):
+        return os.path.join(self.known_hosts_dir, name)
 
     def spec_path(self, name):
         return os.path.join(self.specs_dir, f"{name}.json")
@@ -77,6 +95,17 @@ class Config:
 
     def home_image_path(self, name):
         return os.path.join(self.vm_dir(name), "home.img")
+
+    def identity_image_path(self, name):
+        """The volume holding the guest's own SSH host key.
+
+        Kept apart from the home image so a fork copies project state without
+        inheriting the parent's guest identity.
+        """
+        return os.path.join(self.vm_dir(name), "identity.img")
+
+    def credentials_path(self, name):
+        return os.path.join(self.credentials_dir, name)
 
     def gc_root_path(self, name, slot="current"):
         return os.path.join(self.gc_root_dir, f"{name}-{slot}")
@@ -124,6 +153,7 @@ _KEYS = {
     "vmUser": "vm_user",
     "vmGroup": "vm_group",
     "nameservers": "nameservers",
+    "sshProxy": "ssh_proxy",
 }
 
 

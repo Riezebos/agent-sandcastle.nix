@@ -64,6 +64,11 @@
           prefixLength = 24;
           nameservers = [ "10.88.0.1" ];
         };
+        # The CLI substitutes the host's real control key here. A throwaway one
+        # keeps the eval-coverage runner shaped like a real one.
+        authorizedKeys = [
+          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL8sHqFV9M5DBB6r1x8Q0aLmQ9NcbW7dEXAMPLEONLY example"
+        ];
       };
       agentOverlay = _final: _prev: {
         inherit (agentPackages) claude-code codex happy-coder;

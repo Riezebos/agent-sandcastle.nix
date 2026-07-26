@@ -24,6 +24,7 @@
     vmUser = "microvm";
     vmGroup = "kvm";
     nameservers = cfg.nameservers;
+    sshProxy = "${config.systemd.package}/lib/systemd/systemd-ssh-proxy";
   };
 
   # microvm.nix's tap-up script creates the TAP device but leaves it
@@ -219,6 +220,13 @@ in {
         mode = "0700";
       };
       "${cfg.stateDir}/known-hosts".d = {
+        user = "root";
+        group = "root";
+        mode = "0700";
+      };
+      # Holds the installation's SSH control key, whose private half is the
+      # only thing that can log into a sandbox as `dev`.
+      "${cfg.stateDir}/ssh".d = {
         user = "root";
         group = "root";
         mode = "0700";
