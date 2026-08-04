@@ -12,7 +12,7 @@ not part of the remaining implementation path.
 - ✅ The MicroVM substrate has been evaluated, built, and booted on Foundry.
 - ✅ TAP networking, DNS, NAT, KVM, virtiofs, tmpfs scratch paths, and basic
   egress filtering have been runtime-tested.
-- ✅ `mkSandbox` and the guest base provide a useful starting point.
+- ✅ The guest module provides a useful starting point.
 - ✅ Claude Code, Codex, Node.js, Git, SSH, and common shell tools are already
   packaged in the guest closure.
 - ✅ The `sandcastle` CLI, its JSON schema, state model, and the JSON-to-runner
@@ -21,8 +21,8 @@ not part of the remaining implementation path.
   produces a MicroVM runner with a per-VM store image, a VSOCK CID, a static
   address, and the requested packages, installed through `current` and a Nix
   GC root.
-- 🟡 The legacy declarative host integration and curated union store are still
-  present; the CLI host module does not use them.
+- ✅ The legacy declarative host integration and curated union store have been
+  removed; see M6.
 - 🟡 The current network module works but its hostname/IP egress allowlist will
   be replaced by public-internet egress with private/internal blocking.
 - ✅ The CLI-managed lifecycle exists: `create`, `status`, `start`, `stop`,
@@ -31,7 +31,9 @@ not part of the remaining implementation path.
   key persistence across a reboot.
 - ⬜ No integrated fork operation exists yet.
 - ⬜ No dynamic Caddy route management exists yet.
-- ⬜ Phoenix, Happy, and their downstream deployment have not yet been removed.
+- 🟡 Phoenix and Happy are gone from this repository; the downstream `nix`
+  repository still deploys the launcher and must be updated before its next
+  `flake update`.
 
 ## M0 — Reusable substrate
 
@@ -198,7 +200,8 @@ Notable design decisions made during M2:
 
 ## M3 — Packages, egress, and shared-host limits
 
-- ⬜ Define base guest packages without Happy.
+- ✅ Define base guest packages without Happy. (Landed with the M6 cleanup: the
+  guest module never carried Happy.)
 - ⬜ Resolve validated nixpkgs package attribute paths from the sandbox spec.
 - ⬜ Add `packages list`, `packages add`, and `packages remove`.
 - ⬜ Add convenience profiles for Node, Python, Go, and Rust.
@@ -255,14 +258,25 @@ Notable design decisions made during M2:
 
 ### Upstream repository
 
-- ⬜ Remove `launcher/`.
-- ⬜ Remove `nix/launcher.nix`.
-- ⬜ Remove `nix/launcher-module.nix`.
-- ⬜ Remove launcher packages, checks, migrations, and the Elixir dev shell.
-- ⬜ Remove Phoenix/Elixir dependencies from the flake.
-- ⬜ Remove Happy packages and guest service wiring.
-- ⬜ Remove the curated-store runtime path after CLI VMs use per-VM stores.
-- ⬜ Replace the existing examples with CLI-first examples.
+The upstream half of M6 was pulled forward ahead of M3–M5. Two modules both
+managed `/var/lib/agent-sandcastle`: the curated store declared it `0750 root
+root` while the launcher's `StateDirectory=` chowned it to its own
+unprivileged user, and the two raced on every activation. Rather than relocate
+the curated store for a migration window lasting until M6, the whole retired
+path was deleted, which was already unblocked — CLI runners use per-VM store
+images, and Foundry no longer runs declarative VMs.
+
+- ✅ Remove `launcher/`.
+- ✅ Remove `nix/launcher.nix`.
+- ✅ Remove `nix/launcher-module.nix`.
+- ✅ Remove launcher packages, checks, migrations, and the Elixir dev shell.
+- ✅ Remove Phoenix/Elixir dependencies from the flake.
+- ✅ Remove Happy packages and guest service wiring.
+- ✅ Remove the curated-store runtime path after CLI VMs use per-VM stores.
+  `nix/sandbox-store.nix`, `nix/sandbox.nix` (`lib.mkSandbox`), and
+  `nix/base-image.nix` are gone, along with `nixosModules.host` and
+  `nixosModules.base`. `nixosModules.default` is now `sandcastleHost`.
+- ✅ Replace the existing examples with CLI-first examples.
 
 ### Downstream `nix` repository
 
@@ -286,16 +300,18 @@ Notable design decisions made during M2:
 
 ## Immediate next steps
 
-1. Deploy the CLI host to Foundry and run the full lifecycle through the real
-   `microvm@<name>.service` units, alongside the current launcher.
-2. Add package mutation (`packages list/add/remove`) and simplified egress.
-3. Add aggregate systemd slice limits.
-4. Add raw-disk forking.
-5. Add Caddy route management. `delete` already refuses to remove a sandbox
+1. Update the downstream `nix` repository before its next `flake update`:
+   `nixosModules.host`, `nixosModules.launcher`, and `packages.launcher` no
+   longer exist, so `agentSandcastleLauncher` and the launcher sops secret
+   have to go at the same time as the pin moves.
+2. Deploy the CLI host to Foundry and run the full lifecycle through the real
+   `microvm@<name>.service` units.
+3. Add package mutation (`packages list/add/remove`) and simplified egress.
+4. Add aggregate systemd slice limits.
+5. Add raw-disk forking.
+6. Add Caddy route management. `delete` already refuses to remove a sandbox
    whose Caddy snippet carries a `# sandcastle-sandbox: <name>` marker, so M5
    must emit that marker.
-6. Remove Phoenix, Happy, the launcher secret, and the curated-store path only
-   after the replacement passes the acceptance checklist.
 
 ## Historical work now scheduled for removal
 
@@ -340,13 +356,26 @@ be kept merely because it already exists.
 - Runtime-created sandboxes are not in `config.microvm.vms`, so the host
   cannot enumerate them at build time. TAP devices are attached to the bridge
   by a generic `ExecStartPost` that adopts any unattached `sc-` device.
-- The curated union store requires the host configuration to know all guest
-  closure roots and conflicts with runtime-created CLI sandboxes.
+- The curated union store required the host configuration to know all guest
+  closure roots and conflicted with runtime-created CLI sandboxes. It is gone
+  as of M6.
+- Nesting a root-owned tree inside an unprivileged service's `StateDirectory=`
+  does not hold. `/var/lib/agent-sandcastle` was claimed by both the curated
+  store's tmpfiles rule (`0750 root root`) and the launcher's
+  `StateDirectory=`, whose `setup_exec_directory` chowns it to the launcher
+  user. `systemd-tmpfiles-resetup` and a starting unit interleaved twice
+  (2025-07-21, 2025-08-03) and produced 238/STATE_DIRECTORY, self-healing via
+  `Restart=on-failure`. Ownership of a directory entry does not protect it
+  either: with no sticky bit, write permission on the parent is enough to
+  rename or unlink a `root`-owned child, so the launcher user could have
+  swapped the store out from under `virtiofsd`'s `BindReadOnlyPaths=`. Declare
+  a path in exactly one place, and keep root-written trees out of directories
+  an unprivileged unit owns.
 - NixOS deduplicates imported modules by key, and a path is its own key while a
-  bare function value is not. `nixosModules.sandboxStore` and
-  `sandboxNetwork` are therefore exported as paths: both `nixosModules.host`
-  and `nixosModules.sandcastleHost` pull them in, and exporting them as
-  `import <path>` made importing both fail with "option is already declared".
+  bare function value is not. `nixosModules.sandboxNetwork` is therefore
+  exported as a path, so a host that pulls it in both directly and through
+  `sandcastleHost` still evaluates rather than failing with "option is already
+  declared".
   `checks.example-migration-host-toplevel` pins this, because enabling both at
   once is exactly what the build-alongside migration phase does.
 - A writable guest Nix store is not planned initially. Immutable package-list

@@ -12,37 +12,30 @@ boot path still need runtime validation on a KVM-capable NixOS host.
 
 Implemented so far:
 
-- A sandbox base image with Claude Code, Codex, Happy, Git, SSH, and scratch
-  tmpfs mounts for `/tmp`, `/var/tmp`, and `/home/dev/.cache`.
-- `lib.mkSandbox`, a parameterized microVM template with optional TAP
-  networking, curated-store mounting, Claude token mounting, and writable Codex
-  `auth.json` mounting.
-- `nixosModules.sandboxStore`, which builds a curated chroot Nix store and
-  serves it through a private `virtiofsd` mount namespace so guests do not see
-  the host's main `/nix/store`.
-- `nixosModules.sandboxNetwork`, which creates the sandbox bridge, DHCP/DNS,
-  NAT, and an IP-based nftables egress allowlist.
-- Eval/build examples for a smoke VM and dummy Claude/Codex agent sandboxes.
 - A `sandcastle` CLI (`sandcastle/`) with a versioned JSON sandbox schema,
   strict validation, locking, atomic state updates, allocation of addresses
   and VSOCK CIDs, Nix GC-root management, and a JSON-to-MicroVM runner
   builder. `list`, `show`, `status`, `create`, `start`, `stop`, `restart`,
   `rebuild`, `build`, `logs`, `ssh`, and `delete` are wired up; packages,
   fork, and route commands are next.
-- `nixosModules.sandcastleHost` and `nixosModules.sandcastleGuest`, the
-  CLI-first replacement for the declarative sandbox path.
-- A Phoenix LiveView launcher scaffold in `launcher/` that stores dry-run
-  sandbox records in SQLite, enforces Authentik identity/group authorization,
-  records audit attribution, and renders path-free VM config functions without
-  lifecycle side effects.
+- `nixosModules.sandcastleHost`, which installs the CLI, creates the state
+  directories, and points `microvm.stateDir` at them.
+- `nixosModules.sandcastleGuest`, the guest module a sandbox runner is built
+  from: unprivileged `dev` user, per-VM store image, VSOCK SSH, Claude Code
+  and Codex, and scratch tmpfs mounts for `/tmp`, `/var/tmp`, and
+  `/home/dev/.cache`.
+- `nixosModules.sandboxNetwork`, which creates the sandbox bridge, DHCP/DNS,
+  NAT, and an IP-based nftables egress allowlist.
+
+The Phoenix launcher, `lib.mkSandbox`, and the curated union store have been
+removed; see `PLAN.md` for the CLI-first design that replaced them.
 
 ## Quick Checks
 
 ```sh
 nix flake check
-nix build .#nixosConfigurations.example-host.config.system.build.toplevel
-nix build .#nixosConfigurations.example-agent-host.config.system.build.toplevel
-nix build .#checks.x86_64-linux.launcher-syntax
+nix build .#nixosConfigurations.example-cli-host.config.system.build.toplevel
+nix build .#checks.x86_64-linux.sandbox-example-runner
 ```
 
 The CLI's unit tests run inside its derivation, so `nix build .#sandcastle`
@@ -54,8 +47,8 @@ python3 -m unittest discover --start-directory tests --top-level-directory .
 
 ## CLI-First Path
 
-`PLAN.md` describes the CLI-first design that supersedes the launcher, and
-`PROGRESS.md` tracks it. The host side is enabled with:
+`PLAN.md` describes the CLI-first design and `PROGRESS.md` tracks it. The host
+side is enabled with:
 
 ```nix
 {
@@ -71,9 +64,9 @@ flake to build sandboxes from. Sandbox runners are built by evaluating
 `lib.runnerFromSpecFile` against that flake, so a sandbox always uses the same
 pinned nixpkgs and `microvm.nix` as the host it runs on.
 
-Runtime-created sandboxes use `microvm.nix`'s per-VM store image rather than
-the curated union store, which is what makes them possible without the host
-configuration knowing every guest closure root in advance.
+Runtime-created sandboxes use `microvm.nix`'s per-VM store image, which is what
+makes them possible without the host configuration knowing every guest closure
+root in advance.
 
 ### Lifecycle
 
@@ -133,68 +126,17 @@ Two separate pieces of key material are involved:
   `/var/lib/sandcastle/known-hosts/<name>` on first connect and checks it
   strictly afterwards.
 
-The standalone smoke runner is available as:
-
-```sh
-nix run .#sandbox-smoke
-```
-
-That runner uses QEMU user networking and does not exercise the host bridge or
-curated store. Runtime networking and credential behavior must be tested through
-a NixOS host configuration.
+`packages.sandbox-example-runner` builds a runner exactly the way `sandcastle
+build` does, from the specification in `flake.nix`. It exists for eval and
+build coverage without a running host — it carries a throwaway control key, so
+it is not meant to be booted. Runtime networking and credential behavior must
+be tested through a NixOS host configuration.
 
 ## Examples
 
-`examples/flake.nix` contains two downstream host configurations:
-
-- `stub-host`: one TAP-backed smoke VM using the curated store.
-- `agent-demo-host`: hand-written Claude and Codex sandboxes with dummy staged
-  credential paths under `/var/lib/agent-sandcastle/example-credentials`.
-
-For the Claude demo, stage an environment file like:
-
-```sh
-/var/lib/agent-sandcastle/example-credentials/claude-demo/claude.env
-```
-
-with `CLAUDE_CODE_OAUTH_TOKEN=...`. For the Codex demo, stage:
-
-```sh
-/var/lib/agent-sandcastle/example-credentials/codex-demo/auth.json
-```
-
-The paths are intentionally dummy defaults so the examples can evaluate and
-build without local secrets.
-
-## Launcher Dry Run
-
-The launcher scaffold is under `launcher/`. Use the reproducible shell for the
-Beam toolchain:
-
-```sh
-nix develop .#launcher
-cd launcher
-mix setup
-mix phx.server
-```
-
-Run `nix develop .#launcher` from the repository root. The shell keeps Hex,
-Mix, and native dependency caches in ignored repo-local directories and provides
-Chromium for frontend smoke tests. Rodney session state is kept under ignored
-`.rodney/`; Rodney's bundled browser downloader may still use its own cache
-unless you start the Nix-provided Chromium manually and connect to it. The
-current launcher mode persists records and renders the intended `mkSandbox`
-config only. It does not call systemd, write microVM definitions, stage real
-secrets, or start VMs.
-
-For browser-level checks, use Rodney from the repository root against the
-running Phoenix server:
-
-```sh
-rodney start --local
-rodney open http://127.0.0.1:4000/
-rodney assert 'document.querySelector("[data-phx-main]").classList.contains("phx-connected")'
-```
+`examples/flake.nix` contains a minimal downstream host, `sandcastle-host`,
+that imports `nixosModules.sandcastleHost` and enables `services.sandcastle`.
+Sandboxes are not declared there: they are created at runtime with the CLI.
 
 ## Networking Note
 

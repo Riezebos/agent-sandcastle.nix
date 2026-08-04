@@ -131,7 +131,7 @@ in {
       description = ''
         Hostnames periodically resolved by the host into dynamic nftables
         allowlist sets. This is intentionally exact-hostname based; add
-        deployment-specific GitLab, Happy relay, and registry hosts here.
+        deployment-specific GitLab and registry hosts here.
         Current enforcement is destination-IP filtering from resolved
         A/AAAA records only: no wildcard domains, DNS-name matching, TLS
         SNI inspection, or HTTP Host-header enforcement happens yet.
