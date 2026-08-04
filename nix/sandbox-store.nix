@@ -73,8 +73,11 @@ in
       }
     ];
 
+    # Only the curated store itself is declared here. tmpfiles creates any
+    # missing parents implicitly, so declaring them would just fight whoever
+    # else owns them - notably the launcher, whose StateDirectory= chowns
+    # /var/lib/agent-sandcastle to its own unprivileged user.
     systemd.tmpfiles.rules = [
-      "d /var/lib/agent-sandcastle 0750 root root -"
       "d ${toString cfg.path} 0755 root root -"
     ];
 
